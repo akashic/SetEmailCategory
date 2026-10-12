@@ -1,0 +1,51 @@
+# Closed vocabularies for the frontmatter of docs/lessons/*.md.
+# This file is authoritative: if the capture-lesson skill's frontmatter-spec.md disagrees, this file wins.
+# Never invent a value in a lesson. Record a missing one in that lesson's `proposed_tags`, and add it here
+# once three lessons want it.
+
+lesson_type: [pitfall, convention, heuristic, estimate, tool-choice, anti-pattern, workaround]
+
+phase: [scoping, design, implementation, testing, deployment, operation, handover]
+
+# 1-3 per lesson
+domain:
+  - api              # request/response contracts, status codes, input validation
+  - identity         # Entra ID, managed identities, app registrations, OAuth
+  - security         # least privilege, hardening, abuse resistance
+  - reliability      # timeouts, retries, idempotency, failure handling
+  - scaling          # instance counts, concurrency, throttling
+  - integration      # Power Platform <-> Azure <-> Microsoft 365 boundaries
+  - infra            # Bicep, resource configuration
+  - ci               # pipelines, deployment automation
+  - observability    # logging, telemetry, alerting
+  - tooling          # local developer tools and package managers
+  - source-control   # git, GitHub
+  - process          # how we review, research and decide
+
+# Optional; omit for tech-agnostic lessons
+tech:
+  - azure-functions
+  - microsoft-graph
+  - exchange-online
+  - entra-id
+  - power-automate
+  - power-platform-custom-connectors
+  - dotnet
+  - system-text-json
+  - bicep
+  - github-actions
+  - git
+  - gh-cli
+  - homebrew
+  - powershell
+  - application-insights
+
+scope: [universal, this-org, this-stack, this-project]
+
+cost_if_ignored: [minor, rework, outage, project-level]
+
+confidence: [one-off, repeated, established]
+
+status: [active, superseded, retired]
+
+source: [incident, retro, pr-review, direct-experience, handover-doc]
