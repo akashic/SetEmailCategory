@@ -19,7 +19,7 @@ public static class GraphClientRegistration
 
         var graphClient = services.AddHttpClient<IMailCategoryService, MailCategoryService>((sp, http) =>
         {
-            http.BaseAddress = new Uri(sp.GetRequiredService<IOptions<SharedMailboxOptions>>().Value.GraphBaseUrl);
+            http.BaseAddress = sp.GetRequiredService<IOptions<SharedMailboxOptions>>().Value.GraphBaseUri;
             // Timeouts are owned by the resilience pipeline and the per-invocation deadline.
             http.Timeout = Timeout.InfiniteTimeSpan;
         });

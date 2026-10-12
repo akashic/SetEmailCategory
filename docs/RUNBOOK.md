@@ -64,7 +64,7 @@ Edit `infra/env/prod.bicepparam`, using values from `entra-output.prod.json`:
 | `tags` | Your organisation's mandatory tags |
 | `enablePrivateNetworking` | `false` unless policy requires private storage (see [Private networking](#private-networking)) |
 | `alwaysReadyInstances` | `0` scales to zero, so the first call after idle has a cold start of a few seconds. `1` removes cold starts at a small fixed cost. |
-| Scale (`maximumInstanceCount`, `httpPerInstanceConcurrency`, `graphConcurrencyPerInstance`, `requestDeadlineSeconds`) | Leave the defaults (40 / 16 / 4 / 90). Microsoft advises at least 40 instances for HTTP apps: below that, bursts of email are rejected by the platform before reaching the code. Graph's limit of 4 concurrent requests per mailbox is enforced in code, not by limiting instances. |
+| Scale (`maximumInstanceCount`, `httpPerInstanceConcurrency`, `graphConcurrencyPerInstance`, `requestDeadlineSeconds`) | Leave the defaults (40 / 50 / 4 / 90). Microsoft advises at least 40 instances for HTTP apps: below that, bursts of email are rejected by the platform before reaching the code. Graph allows 4 concurrent requests per app per mailbox. The function enforces that **per instance**, so N instances can send up to 4N. A per-instance HTTP concurrency of 50 means Flex only adds a second instance when more than 50 calls are in flight at once. Below that, every call shares one instance and one 4-slot gate. Above it, Graph throttles the excess with 429 and `Retry-After`, which the function honours, so the result is slower calls, not failures. |
 
 These values are identifiers, not secrets, so commit the file.
 
@@ -160,7 +160,11 @@ The script:
    - **Correlation ID** (advanced): `workflow()?['run']?['name']`. This lets you find the flow run in the function logs.
 3. **Retry policy.** Power Automate's *default* policy retries every 5xx, 408 and 429 response: up to 12 times over about an hour on the Medium/High performance profiles, but only twice (5–10 minutes apart) on the Low profile. The function is idempotent, so retries are always safe. To make behaviour explicit and the same on every licence, set the action's *Settings → Retry policy* to **Exponential interval**, count **6**, interval **PT20S**, maximum interval **PT10M**. That covers transient Graph throttling (503) and a short Exchange permission delay (502). 4xx responses are never retried, because they won't succeed on retry.
 4. **Handle failures visibly.** Add a parallel branch with *Configure run after → has failed / has timed out* that notifies the mailbox owners (e.g. a Teams message with the run link). Otherwise a failed categorisation is only visible in the run history.
-5. **Burst behaviour.** If many emails arrive together, runs execute in parallel. The function queues them internally and finishes each within 90 seconds. If you see `429` or `ResponseTimeout` errors in run history, enable *Settings → Concurrency control* on the trigger with a degree of parallelism of about **10**.
+5. **Burst behaviour.** If many emails arrive together, runs execute in parallel. Up to 50 in-flight calls share one function instance, which queues them for Graph 4 at a time and finishes each within 90 seconds. Calls that hit the deadline return 503, and the retry policy (step 3) retries them. **Leave the trigger's concurrency control off.** Microsoft documents two catches:
+   - Turning it on can't be undone without deleting and re-adding the trigger.
+   - Once the waiting-run queue (10 + degree of parallelism) is full, further trigger events may never become runs, so emails would go uncategorised.
+   
+   Consider it only if run history shows persistent 503s during bursts *and* the *Scale-out and Graph retries* query (Operations → Monitoring) confirms throttling. Even then, test it on a copy of the flow first.
 6. **Categories and colours:** a category that doesn't exist in the mailbox's master category list is still applied, but shows without a colour. To get colours, create the categories once in Outlook while signed in to the shared mailbox.
 
 ## Phase 8: End-to-end verification
@@ -190,6 +194,19 @@ requests
 traces
 | where timestamp > ago(7d) and message startswith "Graph returned"
 | project timestamp, message, correlationId = tostring(customDimensions.CorrelationId), caller = tostring(customDimensions.CallerName)
+
+// Scale-out and Graph retries: more than one instance during a burst means the per-instance Graph gate
+// is multiplied; OnRetry events with Result 429 show Graph throttling it back
+requests
+| where timestamp > ago(7d) and name == "SetCategory"
+| summarize calls = count(), instances = dcount(cloud_RoleInstance) by bin(timestamp, 5m)
+| join kind=leftouter (
+    traces
+    | where timestamp > ago(7d) and message has "OnRetry"
+    | summarize graphRetries = count(), throttled = countif(message has "429") by bin(timestamp, 5m)
+  ) on timestamp
+| where instances > 1 or graphRetries > 0
+| project timestamp, calls, instances, graphRetries, throttled
 ```
 
 If `alertEmailAddresses` is set, an alert emails the list whenever any request fails in a 15-minute window.
@@ -239,7 +256,9 @@ Set `enablePrivateNetworking = true` to:
 | 500 "Service misconfigured" | App Service Authentication is off, so the function refuses every request rather than run unprotected | Redeploy the Bicep to restore `authsettingsV2`. If Authentication **is** on in the portal, the platform may not be setting `WEBSITE_AUTH_ENABLED` on Flex Consumption; check the app's environment variables, and only then set `Security__RequireEasyAuthEnabled = false` in `functionApp.bicep`. |
 | 400 "contains a comma" | Categories passed as `"A, B"` | Use one array item per category. |
 | 503 "Upstream failure" or "Timed out" | Graph throttling or outage persisted through retries, or the 90-second deadline was reached | The flow retry policy handles it. If it's persistent, check [Microsoft 365 service health](https://admin.microsoft.com/servicehealth). |
-| 504 `ResponseTimeout` or 429 in flow run history | A large burst of emails exceeded capacity | Limit trigger concurrency (Phase 7, step 5). Check `maximumInstanceCount` hasn't been lowered below 40. |
+| 504 `ResponseTimeout` or 429 in flow run history | A large burst of emails exceeded capacity | Check `maximumInstanceCount` hasn't been lowered below 40 and `httpPerInstanceConcurrency` hasn't been lowered from 50. Run the *Scale-out and Graph retries* query. Trigger concurrency control is a last resort (Phase 7, step 5). |
+| 413 "Request body too large" | Body over 64 KB: almost always a wrong expression mapped to *Categories* (e.g. the whole email body) | Fix the flow's mapping. A valid request is at most about 10 KB. |
+| 400 "'mode' must be one of" or "Invalid JSON" mentioning `mode` | A number or custom value was entered for *Mode* | Use `add`, `replace` or `remove`. Numbers aren't accepted. |
 | 400 "Rejected by Microsoft Graph" | Graph refused the request for a non-transient reason (the body includes Graph's error code) | Look up the code. Retrying won't help. |
 | Smoke test "App did not detect it is running in Azure" | None of the expected host environment variables are set on this plan | Check the app's environment variables (Kudu/SSH or `az functionapp config appsettings list`) and add the marker that is present to `PlatformInfo.AzureHostMarkers`. |
 | Smoke test "App is refusing requests" | `WEBSITE_AUTH_ENABLED` is not `True` | See the "500 Service misconfigured" row. |

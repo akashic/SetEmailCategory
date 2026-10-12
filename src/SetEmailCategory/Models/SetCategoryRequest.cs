@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace SetEmailCategory.Models;
 
 /// <summary>How the supplied categories are combined with the message's existing categories.</summary>
-[JsonConverter(typeof(JsonStringEnumConverter<CategoryMode>))]
+[JsonConverter(typeof(StrictStringEnumConverter<CategoryMode>))]
 public enum CategoryMode
 {
     /// <summary>Add the categories, keeping any already on the message.</summary>
@@ -15,6 +15,13 @@ public enum CategoryMode
     /// <summary>Remove the supplied categories from the message.</summary>
     Remove,
 }
+
+/// <summary>
+/// Accepts enum names only (case-insensitive). The default converter also accepts integers, so "mode": 99 would
+/// deserialise to an undefined <see cref="CategoryMode"/>.
+/// </summary>
+internal sealed class StrictStringEnumConverter<TEnum>() : JsonStringEnumConverter<TEnum>(namingPolicy: null, allowIntegerValues: false)
+    where TEnum : struct, Enum;
 
 /// <summary>Request body accepted by the SetCategory function.</summary>
 /// <param name="MessageId">Graph/Outlook REST message ID (the "Message Id" output of the Outlook connector trigger).</param>

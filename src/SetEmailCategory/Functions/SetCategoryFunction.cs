@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -23,6 +24,10 @@ public sealed partial class SetCategoryFunction(
     internal const string PrincipalIdHeader = "X-MS-CLIENT-PRINCIPAL-ID";
     internal const string PrincipalNameHeader = "X-MS-CLIENT-PRINCIPAL-NAME";
     internal const string CorrelationHeader = "x-correlation-id";
+
+    // A valid body is at most ~10 KB (two 1,024-character IDs and 25 x 255-character categories); this leaves room
+    // for JSON escaping while stopping an oversized body from being buffered and deserialised.
+    internal const int MaxBodyBytes = 64 * 1024;
 
     // Authentication is enforced by Easy Auth in front of the function, so the trigger is Anonymous
     // (a function key would be a second, shared secret for the custom connector to manage).
@@ -57,14 +62,31 @@ public sealed partial class SetCategoryFunction(
             return Problem(StatusCodes.Status401Unauthorized, "Unauthorized", "An authenticated caller is required.");
         }
 
+        if (req.ContentLength > MaxBodyBytes)
+        {
+            return BodyTooLarge();
+        }
+
         SetCategoryRequest? body;
+        var buffer = ArrayPool<byte>.Shared.Rent(MaxBodyBytes + 1);
         try
         {
-            body = await JsonSerializer.DeserializeAsync<SetCategoryRequest>(req.Body, JsonOptions, cancellationToken);
+            // Content-Length can be absent (chunked), so also stop reading once the limit is passed.
+            var length = await ReadUpToAsync(req.Body, buffer.AsMemory(0, MaxBodyBytes + 1), cancellationToken);
+            if (length > MaxBodyBytes)
+            {
+                return BodyTooLarge();
+            }
+
+            body = JsonSerializer.Deserialize<SetCategoryRequest>(buffer.AsSpan(0, length), JsonOptions);
         }
         catch (JsonException ex)
         {
             return Problem(StatusCodes.Status400BadRequest, "Invalid JSON", ex.Message);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
 
         var validated = RequestValidator.Validate(body, out var errors);
@@ -105,6 +127,23 @@ public sealed partial class SetCategoryFunction(
             CategoryOutcomeStatus.UpstreamFailure => Problem(StatusCodes.Status503ServiceUnavailable, "Upstream failure", outcome.Detail, outcome.GraphRequestId),
             _ => Problem(StatusCodes.Status500InternalServerError, "Unexpected error", outcome.Detail, outcome.GraphRequestId),
         };
+    }
+
+    private static ObjectResult BodyTooLarge() => Problem(StatusCodes.Status413PayloadTooLarge, "Request body too large",
+        $"The request body must be at most {MaxBodyBytes / 1024} KB.");
+
+    /// <summary>Reads until <paramref name="destination"/> is full or the stream ends; returns the bytes read.</summary>
+    private static async Task<int> ReadUpToAsync(Stream stream, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        var total = 0;
+        int read;
+        while (total < destination.Length
+               && (read = await stream.ReadAsync(destination[total..], cancellationToken)) > 0)
+        {
+            total += read;
+        }
+
+        return total;
     }
 
     private static ObjectResult Problem(int status, string title, string? detail, string? graphRequestId = null)

@@ -85,4 +85,30 @@ public class RequestValidatorTests
         Assert.Null(RequestValidator.Validate(new SetCategoryRequest("id", null, null, CategoryMode.Replace), out var errors));
         Assert.Contains("'categories' is required.", errors);
     }
+
+    [Fact]
+    public void Undefined_mode_is_rejected()
+    {
+        Assert.Null(RequestValidator.Validate(new SetCategoryRequest("id", null, ["A"], (CategoryMode)99), out var errors));
+        Assert.Contains("'mode' must be one of: add, replace, remove.", errors);
+    }
+
+    [Fact]
+    public void Oversized_raw_array_is_rejected_before_deduplication()
+    {
+        var categories = Enumerable.Range(0, RequestValidator.MaxRawCategories + 1).Select(i => "c" + i).ToArray();
+
+        Assert.Null(RequestValidator.Validate(new SetCategoryRequest("id", null, categories, null), out var errors));
+        Assert.Contains($"At most {RequestValidator.MaxCategories} categories can be supplied.", errors);
+    }
+
+    [Fact]
+    public void Duplicates_that_collapse_within_the_limit_are_accepted()
+    {
+        var categories = Enumerable.Repeat("Invoice", RequestValidator.MaxRawCategories).Append("invoice").Take(RequestValidator.MaxRawCategories).ToArray();
+
+        var result = RequestValidator.Validate(new SetCategoryRequest("id", null, categories, null), out _);
+
+        Assert.Equal(["Invoice"], result!.Categories);
+    }
 }

@@ -26,7 +26,7 @@ Power Automate flow ──(custom connector, Entra ID OAuth)──► Azure Func
   "messageId": "AAMkAD...",          // "Message Id" from the shared-mailbox trigger
   "internetMessageId": "<...@...>",  // recommended as well: used if the message was moved (angle brackets optional)
   "categories": ["Invoice", "Urgent"],
-  "mode": "add"                      // add (default) | replace | remove
+  "mode": "add"                      // add (default) | replace | remove; names only, numbers are rejected
 }
 ```
 
@@ -35,10 +35,11 @@ Supply `messageId`, `internetMessageId`, or (recommended) both. Outlook message 
 | Status | Meaning | Does a retry help? |
 |---|---|---|
 | 200 | `{ messageId, categories, changed }`. `changed: false` means the message already had the categories. | – |
-| 400 | Invalid input, or Graph rejected the request permanently (details in the `application/problem+json` body) | No |
+| 400 | Invalid input (including a `mode` that isn't one of the three names), or Graph rejected the request permanently (details in the `application/problem+json` body) | No |
 | 401 / 403 | Not authenticated, or the calling app isn't allowed | No |
 | 404 | Message not in the shared mailbox (deleted, or moved and no `internetMessageId` supplied) | No |
 | 409 | `internetMessageId` matched more than one message | No |
+| 413 | Request body over 64 KB (a valid request is at most about 10 KB) | No |
 | 500 | App Service Authentication is disabled, so the function refuses all requests (fails closed), or an unexpected error | Only once fixed |
 | 502 | The function's identity can't access the mailbox (configuration; up to 2 h after granting access) | Yes, during propagation |
 | 503 | Graph throttled or unavailable after retries, or the 90-second deadline was reached | Yes |
@@ -47,7 +48,7 @@ Power Automate's default retry policy retries **every** 5xx (408 and 429 too), s
 
 The call is idempotent, so retries are safe. Each invocation finishes within 90 seconds, inside Power Automate's 120-second limit for synchronous calls. Inside that budget:
 - Graph throttling (429) and transient 5xx errors are retried, honouring `Retry-After`.
-- Graph requests are limited to 4 at a time per instance (Graph's per-mailbox limit).
+- Graph requests are limited to 4 at a time per instance (Graph's per-mailbox limit). Each instance takes up to 50 concurrent calls before Flex adds another, so a typical burst stays on one instance. If it does scale out, Graph throttles the excess with 429 and the retries absorb it.
 - Concurrent updates to the same message are detected (`If-Match`, and Exchange 409 conflicts) and re-applied.
 
 ## Repository layout

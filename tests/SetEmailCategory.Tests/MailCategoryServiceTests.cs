@@ -198,4 +198,8 @@ public class MailCategoryServiceTests
     [InlineData(new[] { "A" }, new[] { "X", "Y" }, CategoryMode.Replace, new[] { "X", "Y" })]
     public void Merge_computes_expected_list(string[] existing, string[] requested, CategoryMode mode, string[] expected)
         => Assert.Equal(expected, MailCategoryService.Merge(existing, requested, mode));
+
+    [Fact]
+    public void Merge_rejects_an_undefined_mode_instead_of_returning_the_existing_list()
+        => Assert.Throws<ArgumentOutOfRangeException>(() => MailCategoryService.Merge(["A"], ["B"], (CategoryMode)99));
 }
