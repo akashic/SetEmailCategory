@@ -157,4 +157,78 @@ public class SetCategoryFunctionTests
         Assert.Equal(expected, problem.StatusCode);
         Assert.Equal("req-1", Assert.IsType<ProblemDetails>(problem.Value).Extensions["graphRequestId"]);
     }
+
+    [Theory]
+    [InlineData("99")]
+    [InlineData("1")]
+    [InlineData("\"1\"")]
+    [InlineData("\"replace, remove\"")]
+    [InlineData("\"delete\"")]
+    public async Task Rejects_modes_that_are_not_one_of_the_three_names(string mode)
+    {
+        var service = new StubService(Ok);
+
+        var result = await CreateFunction(service).Run(CreateRequest($$"""{"messageId":"m","categories":["A"],"mode":{{mode}}}"""), default);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.Null(service.Received);
+    }
+
+    [Theory]
+    [InlineData("add", CategoryMode.Add)]
+    [InlineData("Replace", CategoryMode.Replace)]
+    [InlineData("REMOVE", CategoryMode.Remove)]
+    public async Task Accepts_mode_names_in_any_case(string mode, CategoryMode expected)
+    {
+        var service = new StubService(Ok);
+
+        await CreateFunction(service).Run(CreateRequest($$"""{"messageId":"m","categories":["A"],"mode":"{{mode}}"}"""), default);
+
+        Assert.Equal(expected, service.Received!.Mode);
+    }
+
+    [Fact]
+    public async Task Rejects_a_declared_content_length_over_the_limit_without_reading_the_body()
+    {
+        var service = new StubService(Ok);
+        var request = CreateRequest(ValidBody);
+        request.ContentLength = SetCategoryFunction.MaxBodyBytes + 1;
+
+        var result = await CreateFunction(service).Run(request, default);
+
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.Equal(0, request.Body.Position);
+        Assert.Null(service.Received);
+    }
+
+    [Fact]
+    public async Task Rejects_an_oversized_body_without_content_length()
+    {
+        var service = new StubService(Ok);
+        var padding = new string(' ', SetCategoryFunction.MaxBodyBytes);
+
+        var result = await CreateFunction(service).Run(CreateRequest(ValidBody + padding), default);
+
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.Null(service.Received);
+    }
+
+    [Fact]
+    public async Task Accepts_a_body_exactly_at_the_limit()
+    {
+        var service = new StubService(Ok);
+        var padding = new string(' ', SetCategoryFunction.MaxBodyBytes - ValidBody.Length);
+
+        var result = await CreateFunction(service).Run(CreateRequest(ValidBody + padding), default);
+
+        Assert.IsType<OkObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task Empty_body_is_a_400()
+    {
+        var result = await CreateFunction(new StubService(Ok)).Run(CreateRequest(""), default);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, Assert.IsType<ObjectResult>(result).StatusCode);
+    }
 }

@@ -41,12 +41,12 @@ param instanceMemoryMB int = 512
 @maxValue(1000)
 param maximumInstanceCount int = 40
 
-@description('Concurrent HTTP requests per instance. Requests are I/O-bound, so a higher value means fewer instances and fewer cold starts; excess requests wait in-process for a Graph slot.')
+@description('Concurrent HTTP requests per instance. Flex adds instances only when in-flight requests exceed this per instance, and the Graph limit is enforced per instance, so a high value keeps bursts on one instance (one Graph gate) instead of multiplying Graph concurrency. Requests are I/O-bound and wait in-process for a Graph slot.')
 @minValue(1)
 @maxValue(1000)
-param httpPerInstanceConcurrency int = 16
+param httpPerInstanceConcurrency int = 50
 
-@description('Concurrent Microsoft Graph requests per instance. Graph allows 4 per app per mailbox; anything above that is throttled (429) and retried.')
+@description('Concurrent Microsoft Graph requests per instance. Graph allows 4 per app per mailbox; anything above that is throttled (429) and retried. Per instance: if the app scales to N instances the total can reach N x this value.')
 @minValue(1)
 @maxValue(16)
 param graphConcurrencyPerInstance int = 4

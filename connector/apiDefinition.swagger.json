@@ -40,6 +40,7 @@
           "403": { "description": "Caller's app is not allowed" },
           "404": { "description": "Message not found in the shared mailbox", "schema": { "$ref": "#/definitions/Problem" } },
           "409": { "description": "internetMessageId matched more than one message", "schema": { "$ref": "#/definitions/Problem" } },
+          "413": { "description": "Request body over 64 KB", "schema": { "$ref": "#/definitions/Problem" } },
           "500": { "description": "App Service Authentication is disabled (the function refuses requests until it is restored), or an unexpected error", "schema": { "$ref": "#/definitions/Problem" } },
           "502": { "description": "The function's identity cannot access the mailbox (configuration problem)", "schema": { "$ref": "#/definitions/Problem" } },
           "503": { "description": "Microsoft Graph throttled or unavailable after retries, or the 90-second deadline was reached; safe to retry", "schema": { "$ref": "#/definitions/Problem" } }

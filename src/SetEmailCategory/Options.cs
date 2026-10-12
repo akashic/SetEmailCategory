@@ -3,7 +3,7 @@ using System.ComponentModel.DataAnnotations;
 namespace SetEmailCategory;
 
 /// <summary>Bound from the "SharedMailbox" configuration section (app setting <c>SharedMailbox__Address</c>).</summary>
-public sealed class SharedMailboxOptions
+public sealed class SharedMailboxOptions : IValidatableObject
 {
     public const string SectionName = "SharedMailbox";
 
@@ -11,10 +11,30 @@ public sealed class SharedMailboxOptions
     [Required]
     public string Address { get; set; } = string.Empty;
 
-    /// <summary>Microsoft Graph base URL. Override only for national clouds.</summary>
+    /// <summary>Microsoft Graph base URL. Override only for national clouds; the token scope is derived from it.</summary>
     [Required]
     [Url]
     public string GraphBaseUrl { get; set; } = "https://graph.microsoft.com/v1.0/";
+
+    /// <summary>
+    /// <see cref="GraphBaseUrl"/> with a trailing slash. Without it, relative paths replace the last segment
+    /// ("…/v1.0" + "users/x" resolves to "…/users/x"), silently dropping the API version.
+    /// </summary>
+    internal Uri GraphBaseUri => new(GraphBaseUrl.EndsWith('/') ? GraphBaseUrl : GraphBaseUrl + "/");
+
+    /// <summary>
+    /// Token scope for the Graph cloud named by <see cref="GraphBaseUrl"/> (e.g. https://graph.microsoft.us/.default),
+    /// so changing the URL for a national cloud can't leave tokens issued for the wrong resource.
+    /// </summary>
+    internal string GraphTokenScope => $"{GraphBaseUri.GetLeftPart(UriPartial.Authority)}/.default";
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+    {
+        if (!Uri.TryCreate(GraphBaseUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+        {
+            yield return new ValidationResult("GraphBaseUrl must be an absolute https URL.", [nameof(GraphBaseUrl)]);
+        }
+    }
 }
 
 /// <summary>Bound from the "Security" configuration section.</summary>
@@ -51,7 +71,9 @@ public sealed class ProcessingOptions
 
     /// <summary>
     /// Maximum concurrent Graph requests per instance. Graph allows 4 concurrent requests per app per mailbox;
-    /// gating here keeps bursts queued in-process instead of being throttled (429) by Graph.
+    /// gating here keeps bursts queued in-process instead of being throttled (429) by Graph. The gate is per
+    /// instance, so N instances can reach 4N; a high HTTP per-instance concurrency keeps N at 1 for most bursts,
+    /// and Graph's own 429 + Retry-After (honoured by the retry handler) covers the rest.
     /// </summary>
     [Range(1, 16)]
     public int MaxConcurrentGraphRequests { get; set; } = 4;

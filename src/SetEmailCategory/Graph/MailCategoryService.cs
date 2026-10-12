@@ -176,6 +176,9 @@ public sealed partial class MailCategoryService(
                 break;
             case CategoryMode.Replace:
                 return [.. requested];
+            default:
+                // RequestValidator rejects undefined modes; never fall through to a silent "no change".
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unsupported category mode.");
         }
 
         return result;

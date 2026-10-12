@@ -13,6 +13,12 @@ public static class RequestValidator
     public const int MaxCategoryLength = 255;
     public const int MaxIdLength = 1024;
 
+    /// <summary>
+    /// Upper bound on the raw array, checked before de-duplication so a huge array of tiny names can't make
+    /// validation itself expensive. Generous enough for duplicates in a list that dedupes to <see cref="MaxCategories"/>.
+    /// </summary>
+    public const int MaxRawCategories = 100;
+
     /// <summary>Validates and normalises a request. Returns null and populates <paramref name="errors"/> when invalid.</summary>
     public static ValidatedRequest? Validate(SetCategoryRequest? request, out IReadOnlyList<string> errors)
     {
@@ -39,11 +45,22 @@ public static class RequestValidator
         }
 
         var mode = request.Mode ?? CategoryMode.Add;
+        if (!Enum.IsDefined(mode))
+        {
+            // The JSON converter rejects numbers, but a comma-joined string ("replace, remove") can still combine values.
+            problems.Add("'mode' must be one of: add, replace, remove.");
+        }
+
         var categories = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         if (request.Categories is null)
         {
             problems.Add("'categories' is required.");
+        }
+        else if (request.Categories.Count > MaxRawCategories)
+        {
+            problems.Add($"At most {MaxCategories} categories can be supplied.");
         }
         else
         {
@@ -70,7 +87,7 @@ public static class RequestValidator
                     continue;
                 }
 
-                if (!categories.Contains(name, StringComparer.OrdinalIgnoreCase))
+                if (seen.Add(name))
                 {
                     categories.Add(name);
                 }
