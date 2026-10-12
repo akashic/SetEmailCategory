@@ -38,13 +38,34 @@ public class SetCategoryFunctionTests
         IMailCategoryService service,
         bool requireAuth = true,
         PlatformInfo? platform = null,
-        bool requireEasyAuthEnabled = true) => new(
+        bool requireEasyAuthEnabled = true,
+        int deadlineSeconds = 90) => new(
         service,
         Options.Create(new SecurityOptions { RequireAuthenticatedCaller = requireAuth, RequireEasyAuthEnabled = requireEasyAuthEnabled }),
+        Options.Create(new ProcessingOptions { DeadlineSeconds = deadlineSeconds }),
         platform ?? new PlatformInfo(RunningInAzure: true, EasyAuthEnabled: true),
         NullLogger<SetCategoryFunction>.Instance);
 
     private const string ValidBody = """{"messageId":"m","categories":["A"]}""";
+
+    private sealed class HangingService : IMailCategoryService
+    {
+        public async Task<CategoryOutcome> ApplyAsync(ValidatedRequest request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
+
+    [Fact]
+    public async Task Returns_503_when_the_deadline_expires_instead_of_hanging_past_power_automates_timeout()
+    {
+        var result = await CreateFunction(new HangingService(), deadlineSeconds: 1).Run(CreateRequest(ValidBody), default);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, problem.StatusCode);
+        Assert.Equal("Timed out", Assert.IsType<ProblemDetails>(problem.Value).Title);
+    }
 
     [Fact]
     public async Task Fails_closed_in_azure_when_easy_auth_is_disabled()
@@ -123,8 +144,10 @@ public class SetCategoryFunctionTests
     [InlineData(CategoryOutcomeStatus.MessageNotFound, 404)]
     [InlineData(CategoryOutcomeStatus.AmbiguousMessage, 409)]
     [InlineData(CategoryOutcomeStatus.InvalidMessageId, 400)]
+    [InlineData(CategoryOutcomeStatus.GraphRejected, 400)]
     [InlineData(CategoryOutcomeStatus.MailboxAccessDenied, 502)]
     [InlineData(CategoryOutcomeStatus.UpstreamFailure, 503)]
+    [InlineData(CategoryOutcomeStatus.UnexpectedError, 500)]
     public async Task Maps_outcomes_to_status_codes(CategoryOutcomeStatus status, int expected)
     {
         var service = new StubService(new CategoryOutcome(status, Detail: "d", GraphRequestId: "req-1"));

@@ -64,6 +64,7 @@ Edit `infra/env/prod.bicepparam`, using values from `entra-output.prod.json`:
 | `tags` | Your organisation's mandatory tags |
 | `enablePrivateNetworking` | `false` unless policy requires private storage (see [Private networking](#private-networking)) |
 | `alwaysReadyInstances` | `0` scales to zero, so the first call after idle has a cold start of a few seconds. `1` removes cold starts at a small fixed cost. |
+| Scale (`maximumInstanceCount`, `httpPerInstanceConcurrency`, `graphConcurrencyPerInstance`, `requestDeadlineSeconds`) | Leave the defaults (40 / 16 / 4 / 90). Microsoft advises at least 40 instances for HTTP apps: below that, bursts of email are rejected by the platform before reaching the code. Graph's limit of 4 concurrent requests per mailbox is enforced in code, not by limiting instances. |
 
 These values are identifiers, not secrets, so commit the file.
 
@@ -142,19 +143,25 @@ The script:
    ./scripts/Setup-EntraApps.ps1 -Environment prod -ConnectorRedirectUri '<redirect-url>'
    ```
 5. **Configure DLP (Power Platform admin).** In the environment's DLP policy, put the custom connector in the **same data group** (usually *Business*) as **Office 365 Outlook**, or the flow will be blocked. If your tenant uses a custom-connector URL pattern allow-list, add `https://<functionAppHostName>/*`.
-6. **Test the connection.** Open the **Test** tab → **New connection** → sign in as a member of the caller group. Then call the operation with a real message ID (see Phase 8).
+6. **Choose the connection identity carefully.** The connection holds a *delegated* sign-in. It breaks, and every flow run fails with 401 until someone signs in again, if that account's password is reset, the account is disabled (e.g. the person leaves), or a Conditional Access policy requires re-authentication.
+   - Use a **dedicated service account** (licensed for Power Automate premium, member of the caller group), not a personal account, and make it the flow owner.
+   - With your identity team, make sure Conditional Access **sign-in frequency** and **compliant-device** policies don't apply to this account's access to the *SetEmailCategory API* app. Otherwise the connection expires on that schedule.
+   - Entra refresh tokens also expire after 90 days without use, so a connection that sits idle that long will need re-authenticating. For a mailbox that receives mail regularly, this won't happen.
+7. **Test the connection.** Open the **Test** tab → **New connection** → sign in as the service account. Then call the operation with a real message ID (see Phase 8).
 
 ## Phase 7: Build the flow
 
 1. **Trigger:** Office 365 Outlook → *When a new email arrives in a shared mailbox (V2)*, using the shared mailbox address.
 2. **Action:** *Shared Mailbox Categories* → *Set categories on a shared mailbox message*, with:
    - **Message Id:** `Message Id` from the trigger.
+   - **Internet Message Id:** `Internet Message Id` from the trigger. **Always pass both.** The trigger polls, so the call can arrive minutes after the email does; if someone (or an inbox rule) moves the message in the meantime its Message Id changes, and the function then finds it by Internet Message Id instead of failing with 404.
    - **Categories:** one array item per category (e.g. `Invoice`). Don't comma-separate them into one item.
    - **Mode:** `add` (keeps existing categories), `replace` or `remove`.
    - **Correlation ID** (advanced): `workflow()?['run']?['name']`. This lets you find the flow run in the function logs.
-3. **Retry policy:** in the action's *Settings*, set an exponential retry policy with a count of 4. The function is idempotent, so retries are safe. Retries only help with **503**; 4xx and 502 responses are configuration or data issues.
-4. **If the flow moves the message before categorising it**, pass **Internet Message Id** instead of Message Id. Outlook message IDs change when a message moves between folders.
-5. **Categories and colours:** a category that doesn't exist in the mailbox's master category list is still applied, but shows without a colour. To get colours, create the categories once in Outlook while signed in to the shared mailbox.
+3. **Retry policy.** Power Automate's *default* policy retries every 5xx, 408 and 429 response: up to 12 times over about an hour on the Medium/High performance profiles, but only twice (5–10 minutes apart) on the Low profile. The function is idempotent, so retries are always safe. To make behaviour explicit and the same on every licence, set the action's *Settings → Retry policy* to **Exponential interval**, count **6**, interval **PT20S**, maximum interval **PT10M**. That covers transient Graph throttling (503) and a short Exchange permission delay (502). 4xx responses are never retried, because they won't succeed on retry.
+4. **Handle failures visibly.** Add a parallel branch with *Configure run after → has failed / has timed out* that notifies the mailbox owners (e.g. a Teams message with the run link). Otherwise a failed categorisation is only visible in the run history.
+5. **Burst behaviour.** If many emails arrive together, runs execute in parallel. The function queues them internally and finishes each within 90 seconds. If you see `429` or `ResponseTimeout` errors in run history, enable *Settings → Concurrency control* on the trigger with a degree of parallelism of about **10**.
+6. **Categories and colours:** a category that doesn't exist in the mailbox's master category list is still applied, but shows without a colour. To get colours, create the categories once in Outlook while signed in to the shared mailbox.
 
 ## Phase 8: End-to-end verification
 
@@ -223,6 +230,7 @@ Set `enablePrivateNetworking = true` to:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | 401 from the connector | Token audience or issuer mismatch, or Easy Auth misconfigured | Check `apiAppClientId` in the parameter file matches the API app. Check the connector resource URL is `api://<apiAppClientId>`. |
+| Flow fails with 401 / `ConnectionAuthorizationFailed` after working for a while | The connection's sign-in expired: password reset, account disabled, Conditional Access re-authentication, or 90 days unused | Re-authenticate the connection (Power Automate → *Data → Connections* → fix). Prevent recurrence with a service account and Conditional Access exclusions (Phase 6, step 6). |
 | 403 from the connector | Token was issued to a client not in `allowedClientApplicationIds` | Add the connector's client ID to the parameter file and redeploy. |
 | `AADSTS50105` when creating a connection | User isn't in the caller group | Add the user to the group from Phase 0. |
 | `AADSTS50011` redirect URI mismatch | The connector's unique redirect URI isn't registered | Phase 6, step 4. |
@@ -230,7 +238,11 @@ Set `enablePrivateNetworking = true` to:
 | 404 "Message not found" | Message deleted or moved after the trigger fired | Pass `internetMessageId` instead. |
 | 500 "Service misconfigured" | App Service Authentication is off, so the function refuses every request rather than run unprotected | Redeploy the Bicep to restore `authsettingsV2`. If Authentication **is** on in the portal, the platform may not be setting `WEBSITE_AUTH_ENABLED` on Flex Consumption; check the app's environment variables, and only then set `Security__RequireEasyAuthEnabled = false` in `functionApp.bicep`. |
 | 400 "contains a comma" | Categories passed as `"A, B"` | Use one array item per category. |
-| 503 | Graph throttling or outage persisted through retries | The flow retry policy handles it. If it's persistent, check [Microsoft 365 service health](https://admin.microsoft.com/servicehealth). |
+| 503 "Upstream failure" or "Timed out" | Graph throttling or outage persisted through retries, or the 90-second deadline was reached | The flow retry policy handles it. If it's persistent, check [Microsoft 365 service health](https://admin.microsoft.com/servicehealth). |
+| 504 `ResponseTimeout` or 429 in flow run history | A large burst of emails exceeded capacity | Limit trigger concurrency (Phase 7, step 5). Check `maximumInstanceCount` hasn't been lowered below 40. |
+| 400 "Rejected by Microsoft Graph" | Graph refused the request for a non-transient reason (the body includes Graph's error code) | Look up the code. Retrying won't help. |
+| Smoke test "App did not detect it is running in Azure" | None of the expected host environment variables are set on this plan | Check the app's environment variables (Kudu/SSH or `az functionapp config appsettings list`) and add the marker that is present to `PlatformInfo.AzureHostMarkers`. |
+| Smoke test "App is refusing requests" | `WEBSITE_AUTH_ENABLED` is not `True` | See the "500 Service misconfigured" row. |
 | Smoke test "new version did not come up" | App failed to start, often from a missing `SharedMailbox__Address` | Application Insights → Failures / traces for startup exceptions. |
 | Deployment fails assigning roles | Pipeline identity lacks the constrained RBAC Administrator role | Re-run `Setup-GitHubOidc.ps1`. |
 

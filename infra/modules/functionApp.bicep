@@ -10,6 +10,8 @@ param instanceMemoryMB int
 param maximumInstanceCount int
 param httpPerInstanceConcurrency int
 param alwaysReadyInstances int
+param graphConcurrencyPerInstance int
+param requestDeadlineSeconds int
 @description('Empty string disables VNet integration.')
 param appSubnetId string
 param sharedMailboxAddress string
@@ -75,6 +77,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         { name: 'Security__RequireAuthenticatedCaller', value: 'true' }
         // Refuse all requests if App Service Authentication is ever disabled (see docs/RUNBOOK.md troubleshooting).
         { name: 'Security__RequireEasyAuthEnabled', value: 'true' }
+        { name: 'Processing__MaxConcurrentGraphRequests', value: string(graphConcurrencyPerInstance) }
+        { name: 'Processing__DeadlineSeconds', value: string(requestDeadlineSeconds) }
       ]
     }
     functionAppConfig: {

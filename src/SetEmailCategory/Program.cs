@@ -6,8 +6,6 @@ using Microsoft.Azure.Functions.Worker.Builder;
 using Microsoft.Azure.Functions.Worker.OpenTelemetry;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Http.Resilience;
-using Microsoft.Extensions.Options;
 using OpenTelemetry;
 using OpenTelemetry.Logs;
 using SetEmailCategory;
@@ -46,20 +44,11 @@ builder.Services.AddOptions<SharedMailboxOptions>()
 builder.Services.AddOptions<SecurityOptions>()
     .Bind(builder.Configuration.GetSection(SecurityOptions.SectionName));
 
-builder.Services.AddTransient<GraphAuthHandler>();
+builder.Services.AddOptions<ProcessingOptions>()
+    .Bind(builder.Configuration.GetSection(ProcessingOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
 
-var graphClient = builder.Services.AddHttpClient<IMailCategoryService, MailCategoryService>((sp, http) =>
-    http.BaseAddress = new Uri(sp.GetRequiredService<IOptions<SharedMailboxOptions>>().Value.GraphBaseUrl));
-
-// Retries 408/429/5xx with exponential backoff and honours Graph's Retry-After header.
-// Registered before the auth handler so it is the outer handler and each retry gets a fresh token.
-graphClient.AddStandardResilienceHandler(o =>
-{
-    o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(15);
-    o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(60);
-    o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(30);
-    o.Retry.MaxRetryAttempts = 4;
-});
-graphClient.AddHttpMessageHandler<GraphAuthHandler>();
+builder.Services.AddGraphClient();
 
 builder.Build().Run();
