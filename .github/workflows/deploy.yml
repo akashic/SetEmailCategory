@@ -1,0 +1,142 @@
+name: build-and-deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'infra/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment (must have infra/env/<name>.bicepparam and a GitHub environment)
+        type: choice
+        options: [prod]
+        default: prod
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  FUNCTIONS_PROJECT: src/SetEmailCategory/SetEmailCategory.csproj
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test
+        run: dotnet test SetEmailCategory.sln --configuration Release
+
+      - name: Publish (ReadyToRun for faster cold start)
+        run: >
+          dotnet publish ${{ env.FUNCTIONS_PROJECT }}
+          --configuration Release
+          --runtime linux-x64 --self-contained false
+          -p:PublishReadyToRun=true
+          -p:SourceRevisionId=${{ github.sha }}
+          --output publish
+
+      - name: Package
+        run: cd publish && zip -qr ../app.zip .
+
+      - name: Lint Bicep
+        run: |
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          for f in infra/env/*.bicepparam; do az bicep build-params --file "$f" --stdout > /dev/null; done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app
+          path: app.zip
+          retention-days: 30
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'prod' }}
+    concurrency:
+      group: deploy-${{ inputs.environment || 'prod' }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write # OIDC token for azure/login
+      contents: read
+    env:
+      ENVIRONMENT: ${{ inputs.environment || 'prod' }}
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: app
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if
+        run: >
+          az deployment group what-if
+          --resource-group "$RESOURCE_GROUP"
+          --parameters "infra/env/$ENVIRONMENT.bicepparam"
+          --result-format ResourceIdOnly
+
+      - name: Deploy infrastructure
+        id: infra
+        run: |
+          outputs=$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "setemailcategory-${{ github.run_number }}" \
+            --parameters "infra/env/$ENVIRONMENT.bicepparam" \
+            --query properties.outputs --output json)
+          echo "functionAppName=$(jq -r .functionAppName.value <<< "$outputs")" >> "$GITHUB_OUTPUT"
+          echo "hostName=$(jq -r .functionAppHostName.value <<< "$outputs")" >> "$GITHUB_OUTPUT"
+          echo "principalId=$(jq -r .functionAppPrincipalId.value <<< "$outputs")" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy code
+        run: >
+          az functionapp deployment source config-zip
+          --resource-group "$RESOURCE_GROUP"
+          --name "${{ steps.infra.outputs.functionAppName }}"
+          --src app.zip
+
+      - name: Smoke test
+        env:
+          HOST: ${{ steps.infra.outputs.hostName }}
+        run: |
+          # Wait for the new build (identified by commit SHA in its version) to be serving.
+          for i in $(seq 1 20); do
+            version=$(curl -fsS "https://$HOST/api/health" | jq -r .version || true)
+            if [[ "$version" == *"${{ github.sha }}"* ]]; then echo "Serving $version"; break; fi
+            echo "Waiting for new version (got '$version')"; sleep 15
+          done
+          [[ "$version" == *"${{ github.sha }}"* ]] || { echo "::error::New version did not come up"; exit 1; }
+
+          # Authentication must be enforced.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "https://$HOST/api/messages/categories" \
+            -H 'Content-Type: application/json' -d '{"messageId":"x","categories":["x"]}')
+          [[ "$code" == "401" ]] || { echo "::error::Expected 401 for unauthenticated call, got $code"; exit 1; }
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed to $ENVIRONMENT"
+            echo "- Function app: \`${{ steps.infra.outputs.functionAppName }}\`"
+            echo "- Endpoint: \`https://${{ steps.infra.outputs.hostName }}/api/messages/categories\`"
+            echo "- Managed identity object ID: \`${{ steps.infra.outputs.principalId }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,108 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "Shared Mailbox Categories",
+    "description": "Sets Outlook categories on messages in the configured shared mailbox. The built-in Office 365 Outlook connector cannot set categories on shared mailbox messages.",
+    "version": "1.0"
+  },
+  "host": "{{FUNCTION_HOST}}",
+  "basePath": "/api",
+  "schemes": ["https"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "paths": {
+    "/messages/categories": {
+      "post": {
+        "operationId": "SetMessageCategories",
+        "summary": "Set categories on a shared mailbox message",
+        "description": "Adds, replaces or removes Outlook categories on a message in the shared mailbox. Idempotent: repeating a call has no further effect.",
+        "parameters": [
+          {
+            "name": "x-correlation-id",
+            "in": "header",
+            "type": "string",
+            "required": false,
+            "x-ms-summary": "Correlation ID",
+            "description": "Optional value written to the function's logs, e.g. the flow run ID: workflow()?['run']?['name']",
+            "x-ms-visibility": "advanced"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": { "$ref": "#/definitions/SetCategoryRequest" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Categories applied", "schema": { "$ref": "#/definitions/SetCategoryResponse" } },
+          "400": { "description": "Invalid request", "schema": { "$ref": "#/definitions/Problem" } },
+          "401": { "description": "Not authenticated" },
+          "403": { "description": "Caller's app is not allowed" },
+          "404": { "description": "Message not found in the shared mailbox", "schema": { "$ref": "#/definitions/Problem" } },
+          "409": { "description": "internetMessageId matched more than one message", "schema": { "$ref": "#/definitions/Problem" } },
+          "502": { "description": "The function's identity cannot access the mailbox (configuration problem)", "schema": { "$ref": "#/definitions/Problem" } },
+          "503": { "description": "Microsoft Graph unavailable after retries; safe to retry", "schema": { "$ref": "#/definitions/Problem" } }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "SetCategoryRequest": {
+      "type": "object",
+      "required": ["categories"],
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "x-ms-summary": "Message Id",
+          "description": "The 'Message Id' from the 'When a new email arrives in a shared mailbox (V2)' trigger."
+        },
+        "internetMessageId": {
+          "type": "string",
+          "x-ms-summary": "Internet Message Id",
+          "description": "Use instead of Message Id if the message may have been moved to another folder.",
+          "x-ms-visibility": "advanced"
+        },
+        "categories": {
+          "type": "array",
+          "items": { "type": "string" },
+          "x-ms-summary": "Categories",
+          "description": "Category names, one per item. Names that don't exist in the mailbox's master list still apply but show without a colour."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["add", "replace", "remove"],
+          "default": "add",
+          "x-ms-summary": "Mode",
+          "description": "add (keep existing categories), replace (overwrite all), or remove."
+        }
+      }
+    },
+    "SetCategoryResponse": {
+      "type": "object",
+      "properties": {
+        "messageId": { "type": "string", "x-ms-summary": "Message Id" },
+        "categories": { "type": "array", "items": { "type": "string" }, "x-ms-summary": "Categories" },
+        "changed": { "type": "boolean", "x-ms-summary": "Changed", "description": "False if the message already had the requested categories." }
+      }
+    },
+    "Problem": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "type": "integer" },
+        "detail": { "type": "string" },
+        "graphRequestId": { "type": "string" }
+      }
+    }
+  },
+  "securityDefinitions": {
+    "oauth2-auth": {
+      "type": "oauth2",
+      "flow": "accessCode",
+      "authorizationUrl": "https://login.microsoftonline.com/common/oauth2/authorize",
+      "tokenUrl": "https://login.windows.net/common/oauth2/authorize",
+      "scopes": {}
+    }
+  },
+  "security": [{ "oauth2-auth": [] }]
+}

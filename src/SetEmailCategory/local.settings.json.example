@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+
+    "SharedMailbox__Address": "test-shared-mailbox@contoso.com",
+    "Security__RequireAuthenticatedCaller": "false",
+
+    "AZURE_TENANT_ID": "<tenant-id>",
+    "AZURE_CLIENT_ID": "<dev app registration client id, scoped by Exchange RBAC to a TEST mailbox>",
+    "AZURE_CLIENT_SECRET": "<dev app registration secret - never commit>"
+  }
+}

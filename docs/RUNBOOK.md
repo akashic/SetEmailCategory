@@ -1,0 +1,260 @@
+# SetEmailCategory: Deployment & Operations Runbook
+
+This runbook takes a new environment from nothing to a working Power Automate flow, then covers day-2 operations. Phases 1–3 and 5–6 are one-time admin tasks per environment. After that, every merge to `main` deploys automatically.
+
+| Phase | What | Who (role needed) | Time |
+|---|---|---|---|
+| 0 | Prerequisites | Azure subscription Owner | 15 min |
+| 1 | Entra ID app registrations | Entra **Application Administrator** | 10 min |
+| 2 | Environment parameters | Developer | 5 min |
+| 3 | GitHub OIDC deployment identity | Subscription/RG **Owner**, GitHub repo admin | 10 min |
+| 4 | First deployment | Pipeline (automatic) | 10 min |
+| 5 | Scope mailbox access in Exchange | **Exchange Administrator** / Organization Management | 10 min + up to 2 h propagation |
+| 6 | Custom connector & DLP | Power Platform **Environment Maker** + **Power Platform Admin** (DLP) | 20 min |
+| 7 | Build the flow | Flow author | 15 min |
+| 8 | End-to-end verification | Flow author | 10 min |
+
+All scripts are PowerShell 7 and run unchanged in **Azure Cloud Shell** (PowerShell mode), which already has `az`, `pwsh` and `Install-Module` access. Every script is safe to re-run.
+
+---
+
+## Phase 0: Prerequisites
+
+1. **Choose a region that supports Flex Consumption:**
+   ```bash
+   az functionapp list-flexconsumption-locations --query "[].name" -o tsv
+   ```
+2. **Register resource providers** (once per subscription):
+   ```bash
+   for p in Microsoft.Web Microsoft.Storage Microsoft.Insights Microsoft.OperationalInsights Microsoft.Network Microsoft.App; do
+     az provider register --namespace $p
+   done
+   ```
+   `Microsoft.App` is needed only for private networking (Flex VNet integration uses subnet delegation to `Microsoft.App/environments`).
+3. **Confirm the shared mailbox exists** and note its primary SMTP address.
+4. **Decide on a caller group (recommended).** Create an Entra security group containing the people or service account who own the flows, for example `SG-SetEmailCategory-Users`. Only its members will be able to create a connection to the connector.
+5. **Check Azure Policy.** This template already disables storage shared keys, blob public access, FTP/basic auth and App Insights local auth, and enforces TLS 1.2. If your landing zone requires extra tags or diagnostic settings, add them to `tags` in the parameter file.
+
+## Phase 1: Entra ID app registrations
+
+```powershell
+./scripts/Setup-EntraApps.ps1 -Environment prod -CallerGroupObjectId <group-object-id>
+```
+
+This creates two app registrations:
+- **SetEmailCategory API (prod).** This is the resource the function validates tokens for. It exposes the `user_impersonation` scope and issues v2.0 tokens. With `-CallerGroupObjectId`, the API requires assignment, so only group members can get a token.
+- **SetEmailCategory Connector (prod).** This is the OAuth client used by the custom connector. It gets admin consent to the API scope and a client secret.
+
+**The client secret is printed once.** Store it in your password vault immediately, because Phase 6 needs it. Record its expiry date in your secret-rotation calendar.
+
+Output: `entra-output.prod.json` (identifiers only, no secrets; git-ignored).
+
+> Neither app registration gets any Microsoft Graph permission. Mailbox access belongs to the function's managed identity (Phase 5).
+
+## Phase 2: Environment parameters
+
+Edit `infra/env/prod.bicepparam`, using values from `entra-output.prod.json`:
+
+| Parameter | Value |
+|---|---|
+| `sharedMailboxAddress` | Shared mailbox primary SMTP address |
+| `apiAppClientId` | `apiAppClientId` |
+| `allowedClientApplicationIds` | `[ connectorClientId ]` |
+| `alertEmailAddresses` | Ops distribution list |
+| `tags` | Your organisation's mandatory tags |
+| `enablePrivateNetworking` | `false` unless policy requires private storage (see [Private networking](#private-networking)) |
+| `alwaysReadyInstances` | `0` scales to zero, so the first call after idle has a cold start of a few seconds. `1` removes cold starts at a small fixed cost. |
+
+These values are identifiers, not secrets, so commit the file.
+
+## Phase 3: GitHub OIDC deployment identity
+
+```powershell
+./scripts/Setup-GitHubOidc.ps1 -SubscriptionId <sub-id> -ResourceGroup rg-setemailcat-prod -Location <region> `
+    -GitHubRepository <org>/SetEmailCategory -GitHubEnvironment prod -SetGitHubVariables
+```
+
+This creates the resource group (if needed) and a user-assigned managed identity. GitHub can only use that identity from the `prod` environment of this repo. The script grants it:
+- **Contributor** on the resource group only.
+- **Role Based Access Control Administrator** on the resource group, with a condition that it can only assign the four data roles the function needs (Storage Blob/Queue/Table data roles and Monitoring Metrics Publisher), and only to service principals.
+
+It writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` and `AZURE_RESOURCE_GROUP` as variables on the GitHub environment. Without `-SetGitHubVariables`, it prints them for you to add by hand.
+
+Then, in GitHub, open **Settings → Environments → prod** and set:
+- **Required reviewers:** recommended for production.
+- **Deployment branches:** `main` only.
+
+## Phase 4: First deployment
+
+Run the **build-and-deploy** workflow (Actions tab → *Run workflow*), or merge to `main`. The workflow:
+1. Runs the unit tests, publishes a ReadyToRun build and lints the Bicep.
+2. Runs `what-if`, then deploys the Bicep and uploads the code package.
+3. Runs a smoke test: waits until `/api/health` reports the new commit SHA, and checks that an unauthenticated call returns **401**.
+
+The run summary shows the **function app name**, the **endpoint URL** and the **managed identity object ID**, which you need next.
+
+<details><summary>Manual fallback (no pipeline)</summary>
+
+```bash
+az deployment group create -g rg-setemailcat-prod --parameters infra/env/prod.bicepparam --query properties.outputs
+dotnet publish src/SetEmailCategory -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=true -o publish
+(cd publish && zip -qr ../app.zip .)
+az functionapp deployment source config-zip -g rg-setemailcat-prod -n <functionAppName> --src app.zip
+```
+</details>
+
+## Phase 5: Scope mailbox access in Exchange Online
+
+```powershell
+./scripts/Grant-MailboxAccess.ps1 -ResourceGroup rg-setemailcat-prod -FunctionAppName <functionAppName> `
+    -SharedMailbox <shared-mailbox@contoso.com> -NegativeTestMailbox <any-other-mailbox@contoso.com>
+```
+
+The script:
+1. **Refuses to continue** if the managed identity has any Microsoft Graph application permission in Entra ID. Exchange RBAC grants are *added to* Entra grants, so a tenant-wide `Mail.ReadWrite` in Entra would make the mailbox scope meaningless.
+2. Registers the managed identity in Exchange (`New-ServicePrincipal`).
+3. Creates a management scope containing only the shared mailbox, and assigns the **Application Mail.ReadWrite** role within that scope.
+4. Runs `Test-ServicePrincipalAuthorization` to prove the shared mailbox is **in scope** and the negative-test mailbox is **out of scope**.
+
+**Permission changes take 30 minutes to 2 hours to reach the app.** Until then, calls return **502 "Mailbox access denied"**.
+
+> If the shared mailbox's primary SMTP address ever changes, re-run this script. The management scope filters on that address.
+
+## Phase 6: Custom connector & DLP
+
+1. **Build the connector files:**
+   ```powershell
+   ./scripts/Build-ConnectorDefinition.ps1 -EntraOutput ./entra-output.prod.json `
+       -FunctionHostName <functionAppHostName> -Publisher "<Your team>"
+   ```
+2. **Create the connector** with the [Power Platform CLI](https://learn.microsoft.com/power-platform/developer/cli/introduction):
+   ```bash
+   pac auth create --environment <environment-url>
+   pac connector create --environment <environment-url> \
+     --api-definition-file connector/dist/prod/apiDefinition.swagger.json \
+     --api-properties-file connector/dist/prod/apiProperties.json
+   # Optional for ALM: add --solution-unique-name <solution> to create it inside a solution.
+   ```
+   Or import the swagger file in the maker portal (**Custom connectors → New → Import an OpenAPI file**) and set Security as below.
+3. **Add the client secret.** In the maker portal, open the connector → **Security** tab → paste the client secret from Phase 1 → **Update connector**. Check that the identity provider is *Azure Active Directory*, the client ID is `connectorClientId` and the resource URL is `apiIdentifierUri`.
+4. **Register the connector's redirect URI.** Copy the **Redirect URL** shown on the Security tab (it's unique to the connector), then run:
+   ```powershell
+   ./scripts/Setup-EntraApps.ps1 -Environment prod -ConnectorRedirectUri '<redirect-url>'
+   ```
+5. **Configure DLP (Power Platform admin).** In the environment's DLP policy, put the custom connector in the **same data group** (usually *Business*) as **Office 365 Outlook**, or the flow will be blocked. If your tenant uses a custom-connector URL pattern allow-list, add `https://<functionAppHostName>/*`.
+6. **Test the connection.** Open the **Test** tab → **New connection** → sign in as a member of the caller group. Then call the operation with a real message ID (see Phase 8).
+
+## Phase 7: Build the flow
+
+1. **Trigger:** Office 365 Outlook → *When a new email arrives in a shared mailbox (V2)*, using the shared mailbox address.
+2. **Action:** *Shared Mailbox Categories* → *Set categories on a shared mailbox message*, with:
+   - **Message Id:** `Message Id` from the trigger.
+   - **Categories:** one array item per category (e.g. `Invoice`). Don't comma-separate them into one item.
+   - **Mode:** `add` (keeps existing categories), `replace` or `remove`.
+   - **Correlation ID** (advanced): `workflow()?['run']?['name']`. This lets you find the flow run in the function logs.
+3. **Retry policy:** in the action's *Settings*, set an exponential retry policy with a count of 4. The function is idempotent, so retries are safe. Retries only help with **503**; 4xx and 502 responses are configuration or data issues.
+4. **If the flow moves the message before categorising it**, pass **Internet Message Id** instead of Message Id. Outlook message IDs change when a message moves between folders.
+5. **Categories and colours:** a category that doesn't exist in the mailbox's master category list is still applied, but shows without a colour. To get colours, create the categories once in Outlook while signed in to the shared mailbox.
+
+## Phase 8: End-to-end verification
+
+- [ ] Send a test email to the shared mailbox. The flow runs, the action returns 200, and Outlook shows the category.
+- [ ] Re-run the same flow run. It returns 200 with `changed: false`, which shows the call is idempotent.
+- [ ] Call the connector with a made-up message ID. It returns 404.
+- [ ] In Application Insights → **Transaction search**, find the request by its correlation ID.
+- [ ] `curl -X POST https://<host>/api/messages/categories` with no token returns 401.
+- [ ] (Optional) A user **outside** the caller group can't create a connection.
+
+---
+
+## Operations
+
+### Monitoring
+
+Application Insights (`appi-setemailcat-<env>-*`) → **Logs**:
+
+```kusto
+// Request volume and failures
+requests
+| where timestamp > ago(7d) and name == "SetCategory"
+| summarize total = count(), failed = countif(success == false) by bin(timestamp, 1d), resultCode
+
+// Graph errors with request IDs (give these to Microsoft support)
+traces
+| where timestamp > ago(7d) and message startswith "Graph returned"
+| project timestamp, message, correlationId = tostring(customDimensions.CorrelationId), caller = tostring(customDimensions.CallerName)
+```
+
+If `alertEmailAddresses` is set, an alert emails the list whenever any request fails in a 15-minute window.
+
+### Secret rotation (connector client secret)
+
+The connector's client secret is the only secret in the solution. Before it expires:
+```powershell
+./scripts/Setup-EntraApps.ps1 -Environment prod -RotateSecret
+```
+Paste the new secret on the connector's **Security** tab → **Update connector**. Existing connections continue to work. After confirming flows run, delete the old secret under **App registrations → SetEmailCategory Connector → Certificates & secrets**.
+
+### Rollback
+
+Flex Consumption has no deployment slots, so you roll back by redeploying a previous commit: **Actions → build-and-deploy → Run workflow** and pick the earlier tag or commit as the ref. Tag each production release (`git tag v1.2.0 && git push --tags`) so known-good points are easy to find.
+
+### Adding dev/test environments
+
+1. Use a **separate test shared mailbox**. Never point non-production at the production mailbox.
+2. Copy `infra/env/prod.bicepparam` to `infra/env/dev.bicepparam` and set `environmentName = 'dev'`.
+3. Run Phases 1, 3, 5 and 6 with `-Environment dev` / `-GitHubEnvironment dev`.
+4. Add `dev` to the workflow's `environment` choice list.
+
+### Private networking
+
+Set `enablePrivateNetworking = true` to:
+- make storage reachable only through private endpoints (blob, queue, table), and
+- integrate the function with a new VNet for outbound traffic.
+
+**Inbound** stays public, protected by Entra ID, because Power Platform's cloud connectors must reach it.
+
+- **If your landing zone manages private DNS centrally** (hub `privatelink.*` zones plus Azure Policy), also set `createPrivateDnsZones = false`. Policy then links the private endpoints to the hub zones.
+- **If the VNet must peer to a hub**, adjust `vnetAddressPrefix`, `appSubnetPrefix` and `privateEndpointSubnetPrefix` to a non-overlapping range from your IPAM, and peer it after deployment.
+- **Making inbound private as well** isn't covered by this template. It needs a function-app private endpoint, [Power Platform virtual network support](https://learn.microsoft.com/power-platform/admin/vnet-support-overview) for the environment, and self-hosted GitHub runners inside the network.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| 401 from the connector | Token audience or issuer mismatch, or Easy Auth misconfigured | Check `apiAppClientId` in the parameter file matches the API app. Check the connector resource URL is `api://<apiAppClientId>`. |
+| 403 from the connector | Token was issued to a client not in `allowedClientApplicationIds` | Add the connector's client ID to the parameter file and redeploy. |
+| `AADSTS50105` when creating a connection | User isn't in the caller group | Add the user to the group from Phase 0. |
+| `AADSTS50011` redirect URI mismatch | The connector's unique redirect URI isn't registered | Phase 6, step 4. |
+| 502 "Mailbox access denied" | Exchange RBAC missing, still propagating, or the mailbox address changed | Wait up to 2 h after Phase 5. Re-run `Grant-MailboxAccess.ps1`; it verifies the scope. |
+| 404 "Message not found" | Message deleted or moved after the trigger fired | Pass `internetMessageId` instead. |
+| 400 "contains a comma" | Categories passed as `"A, B"` | Use one array item per category. |
+| 503 | Graph throttling or outage persisted through retries | The flow retry policy handles it. If it's persistent, check [Microsoft 365 service health](https://admin.microsoft.com/servicehealth). |
+| Smoke test "new version did not come up" | App failed to start, often from a missing `SharedMailbox__Address` | Application Insights → Failures / traces for startup exceptions. |
+| Deployment fails assigning roles | Pipeline identity lacks the constrained RBAC Administrator role | Re-run `Setup-GitHubOidc.ps1`. |
+
+### Decommissioning
+
+1. Delete the flows and the custom connector, and remove the connector from the DLP policy.
+2. In Exchange Online:
+   ```powershell
+   Remove-ManagementRoleAssignment "SetEmailCategory - <functionAppName> - Mail.ReadWrite"
+   Remove-ManagementScope "SetEmailCategory - <address>"
+   ```
+   The Exchange service-principal pointer is removed automatically when the managed identity is deleted.
+3. Delete the resource group, which removes the function app, its managed identity, storage, monitoring and the deployment identity.
+4. Delete both app registrations (*SetEmailCategory API/Connector (env)*).
+5. Delete the GitHub environment.
+
+## Security summary (for review boards)
+
+| Control | Implementation |
+|---|---|
+| Caller authentication | Entra ID OAuth (delegated) through the custom connector. App Service Authentication validates issuer, audience and calling app before code runs. |
+| Caller authorisation | `allowedApplications` = connector app only. Optional assignment-required group on the API app. |
+| Defence in depth | The function also rejects requests without an Easy Auth principal header, which the platform strips from client requests. |
+| Mailbox access | System-assigned managed identity. Exchange RBAC for Applications grants `Mail.ReadWrite` on **one** mailbox, and **no** Entra Graph permission (the script enforces this). |
+| Secrets | None in Azure or GitHub. Storage and App Insights use Entra ID. Deployment uses OIDC federation. One OAuth client secret is held by Power Platform and rotated per the procedure above. |
+| Deployment privilege | RG-scoped Contributor, plus RBAC Administrator constrained by ABAC to four data roles for service principals. |
+| Platform hardening | HTTPS only, TLS 1.2+, FTP/SCM basic auth disabled, storage shared keys and public blob access disabled, App Insights local auth disabled. Optional private endpoints. |
+| Audit | Caller identity, correlation ID and Graph request IDs are logged to Application Insights. Function logs go to Log Analytics (90-day default retention). Message content is never logged. |

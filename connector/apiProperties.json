@@ -1,0 +1,32 @@
+{
+  "properties": {
+    "connectionParameters": {
+      "token": {
+        "type": "oauthSetting",
+        "oAuthSettings": {
+          "identityProvider": "aad",
+          "clientId": "{{CONNECTOR_CLIENT_ID}}",
+          "scopes": [],
+          "redirectMode": "GlobalPerConnector",
+          "redirectUrl": "https://global.consent.azure-apim.net/redirect",
+          "properties": {
+            "IsFirstParty": "False",
+            "AzureActiveDirectoryResourceId": "{{API_IDENTIFIER_URI}}",
+            "IsOnbehalfofLoginSupported": false
+          },
+          "customParameters": {
+            "loginUri": { "value": "https://login.microsoftonline.com" },
+            "tenantId": { "value": "{{TENANT_ID}}" },
+            "resourceUri": { "value": "{{API_IDENTIFIER_URI}}" },
+            "enableOnbehalfOfLogin": { "value": "false" }
+          }
+        }
+      }
+    },
+    "iconBrandColor": "#0F6CBD",
+    "capabilities": [],
+    "policyTemplateInstances": [],
+    "publisher": "{{PUBLISHER}}",
+    "stackOwner": "{{PUBLISHER}}"
+  }
+}

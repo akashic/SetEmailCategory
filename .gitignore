@@ -1,0 +1,20 @@
+# .NET
+bin/
+obj/
+publish/
+*.user
+TestResults/
+*.trx
+
+# Functions local settings (may contain secrets)
+local.settings.json
+
+# Environment-specific outputs from scripts
+entra-output.*.json
+connector/dist/
+
+# Build artifacts
+app.zip
+
+# OS / editor
+.DS_Store

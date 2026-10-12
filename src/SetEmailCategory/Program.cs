@@ -1,0 +1,62 @@
+using Azure.Core;
+using Azure.Identity;
+using Azure.Monitor.OpenTelemetry.Exporter;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Builder;
+using Microsoft.Azure.Functions.Worker.OpenTelemetry;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Http.Resilience;
+using Microsoft.Extensions.Options;
+using OpenTelemetry;
+using OpenTelemetry.Logs;
+using SetEmailCategory;
+using SetEmailCategory.Graph;
+
+var builder = FunctionsApplication.CreateBuilder(args);
+
+builder.ConfigureFunctionsWebApplication();
+
+// In Azure, use the app's system-assigned managed identity explicitly (deterministic, no credential probing).
+// Locally, DefaultAzureCredential picks up AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET for a dev app registration.
+TokenCredential credential = string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID"))
+    ? new DefaultAzureCredential()
+    : new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned);
+builder.Services.AddSingleton(credential);
+
+if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING")))
+{
+    builder.Services.AddOpenTelemetry()
+        .UseFunctionsWorkerDefaults()
+        // Application Insights has local (key) auth disabled, so telemetry is sent with Entra ID.
+        .UseAzureMonitorExporter(o => o.Credential = credential);
+
+    // Export logging scopes (CallerId, CorrelationId) as customDimensions for audit queries.
+    builder.Services.Configure<OpenTelemetryLoggerOptions>(o => o.IncludeScopes = true);
+}
+
+builder.Services.AddOptions<SharedMailboxOptions>()
+    .Bind(builder.Configuration.GetSection(SharedMailboxOptions.SectionName))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
+builder.Services.AddOptions<SecurityOptions>()
+    .Bind(builder.Configuration.GetSection(SecurityOptions.SectionName));
+
+builder.Services.AddTransient<GraphAuthHandler>();
+
+var graphClient = builder.Services.AddHttpClient<IMailCategoryService, MailCategoryService>((sp, http) =>
+    http.BaseAddress = new Uri(sp.GetRequiredService<IOptions<SharedMailboxOptions>>().Value.GraphBaseUrl));
+
+// Retries 408/429/5xx with exponential backoff and honours Graph's Retry-After header.
+// Registered before the auth handler so it is the outer handler and each retry gets a fresh token.
+graphClient.AddStandardResilienceHandler(o =>
+{
+    o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(15);
+    o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(60);
+    o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(30);
+    o.Retry.MaxRetryAttempts = 4;
+});
+graphClient.AddHttpMessageHandler<GraphAuthHandler>();
+
+builder.Build().Run();
