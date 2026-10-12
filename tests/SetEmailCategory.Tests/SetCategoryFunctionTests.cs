@@ -34,10 +34,64 @@ public class SetCategoryFunctionTests
         return context.Request;
     }
 
-    private static SetCategoryFunction CreateFunction(IMailCategoryService service, bool requireAuth = true) => new(
+    private static SetCategoryFunction CreateFunction(
+        IMailCategoryService service,
+        bool requireAuth = true,
+        PlatformInfo? platform = null,
+        bool requireEasyAuthEnabled = true,
+        int deadlineSeconds = 90) => new(
         service,
-        Options.Create(new SecurityOptions { RequireAuthenticatedCaller = requireAuth }),
+        Options.Create(new SecurityOptions { RequireAuthenticatedCaller = requireAuth, RequireEasyAuthEnabled = requireEasyAuthEnabled }),
+        Options.Create(new ProcessingOptions { DeadlineSeconds = deadlineSeconds }),
+        platform ?? new PlatformInfo(RunningInAzure: true, EasyAuthEnabled: true),
         NullLogger<SetCategoryFunction>.Instance);
+
+    private const string ValidBody = """{"messageId":"m","categories":["A"]}""";
+
+    private sealed class HangingService : IMailCategoryService
+    {
+        public async Task<CategoryOutcome> ApplyAsync(ValidatedRequest request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        }
+    }
+
+    [Fact]
+    public async Task Returns_503_when_the_deadline_expires_instead_of_hanging_past_power_automates_timeout()
+    {
+        var result = await CreateFunction(new HangingService(), deadlineSeconds: 1).Run(CreateRequest(ValidBody), default);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, problem.StatusCode);
+        Assert.Equal("Timed out", Assert.IsType<ProblemDetails>(problem.Value).Title);
+    }
+
+    [Fact]
+    public async Task Fails_closed_in_azure_when_easy_auth_is_disabled()
+    {
+        var service = new StubService(Ok);
+        var function = CreateFunction(service, platform: new PlatformInfo(RunningInAzure: true, EasyAuthEnabled: false));
+
+        // Even a request carrying a (potentially forged) principal header is refused.
+        var result = await function.Run(CreateRequest(ValidBody), default);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.Null(service.Received);
+    }
+
+    [Theory]
+    [InlineData(true, true, true)]    // Azure, Easy Auth on
+    [InlineData(false, false, true)]  // local development: check doesn't apply
+    [InlineData(true, false, false)]  // Azure, Easy Auth off, check explicitly disabled by ops
+    public async Task Easy_auth_check_allows_request(bool runningInAzure, bool easyAuthEnabled, bool requireEasyAuthEnabled)
+    {
+        var function = CreateFunction(new StubService(Ok),
+            platform: new PlatformInfo(runningInAzure, easyAuthEnabled),
+            requireEasyAuthEnabled: requireEasyAuthEnabled);
+
+        Assert.IsType<OkObjectResult>(await function.Run(CreateRequest(ValidBody), default));
+    }
 
     private static readonly CategoryOutcome Ok = new(CategoryOutcomeStatus.Success, "msg-1", ["Invoice"], Changed: true);
 
@@ -90,8 +144,10 @@ public class SetCategoryFunctionTests
     [InlineData(CategoryOutcomeStatus.MessageNotFound, 404)]
     [InlineData(CategoryOutcomeStatus.AmbiguousMessage, 409)]
     [InlineData(CategoryOutcomeStatus.InvalidMessageId, 400)]
+    [InlineData(CategoryOutcomeStatus.GraphRejected, 400)]
     [InlineData(CategoryOutcomeStatus.MailboxAccessDenied, 502)]
     [InlineData(CategoryOutcomeStatus.UpstreamFailure, 503)]
+    [InlineData(CategoryOutcomeStatus.UnexpectedError, 500)]
     public async Task Maps_outcomes_to_status_codes(CategoryOutcomeStatus status, int expected)
     {
         var service = new StubService(new CategoryOutcome(status, Detail: "d", GraphRequestId: "req-1"));

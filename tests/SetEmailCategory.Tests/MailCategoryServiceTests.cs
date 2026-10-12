@@ -78,6 +78,32 @@ public class MailCategoryServiceTests
     }
 
     [Fact]
+    public async Task Replace_tolerates_empty_patch_response()
+    {
+        _graph.Respond(HttpStatusCode.NoContent);
+
+        var outcome = await CreateService().ApplyAsync(Request(CategoryMode.Replace, "Only"), default);
+
+        Assert.Equal(CategoryOutcomeStatus.Success, outcome.Status);
+        Assert.Equal("msg-1", outcome.MessageId);
+        Assert.Equal(["Only"], outcome.Categories);
+    }
+
+    [Fact]
+    public async Task Add_treats_empty_patch_response_as_success_not_as_a_conflict()
+    {
+        _graph.RespondMessage("msg-1", ["Existing"])
+              .Respond(HttpStatusCode.NoContent);
+
+        var outcome = await CreateService().ApplyAsync(Request(CategoryMode.Add, "Invoice"), default);
+
+        Assert.Equal(CategoryOutcomeStatus.Success, outcome.Status);
+        Assert.True(outcome.Changed);
+        Assert.Equal(["Existing", "Invoice"], outcome.Categories);
+        Assert.Equal(2, _graph.Requests.Count); // GET + PATCH, no concurrency retry
+    }
+
+    [Fact]
     public async Task Retries_read_modify_write_when_message_changed_concurrently()
     {
         _graph.RespondMessage("msg-1", ["A"], etag: "W/\"v1\"")
@@ -95,9 +121,10 @@ public class MailCategoryServiceTests
     [Fact]
     public async Task Gives_up_after_max_concurrency_attempts()
     {
+        // Each re-read shows a new ETag: a genuine, persistent concurrent writer.
         for (var i = 0; i < MailCategoryService.MaxConcurrencyAttempts; i++)
         {
-            _graph.RespondMessage("msg-1", [$"v{i}"]).Respond(HttpStatusCode.PreconditionFailed);
+            _graph.RespondMessage("msg-1", [$"v{i}"], etag: $"W/\"v{i}\"").Respond(HttpStatusCode.PreconditionFailed);
         }
 
         var outcome = await CreateService().ApplyAsync(Request(CategoryMode.Add, "Invoice"), default);
@@ -139,8 +166,12 @@ public class MailCategoryServiceTests
     [Theory]
     [InlineData(HttpStatusCode.NotFound, "ErrorItemNotFound", CategoryOutcomeStatus.MessageNotFound)]
     [InlineData(HttpStatusCode.BadRequest, "ErrorInvalidIdMalformed", CategoryOutcomeStatus.InvalidMessageId)]
+    [InlineData(HttpStatusCode.BadRequest, "ErrorInvalidMailboxItemId", CategoryOutcomeStatus.InvalidMessageId)]
     [InlineData(HttpStatusCode.Forbidden, "ErrorAccessDenied", CategoryOutcomeStatus.MailboxAccessDenied)]
     [InlineData(HttpStatusCode.InternalServerError, "ErrorInternalServerError", CategoryOutcomeStatus.UpstreamFailure)]
+    [InlineData(HttpStatusCode.TooManyRequests, "ApplicationThrottled", CategoryOutcomeStatus.UpstreamFailure)]
+    [InlineData(HttpStatusCode.BadRequest, "ErrorInvalidProperty", CategoryOutcomeStatus.GraphRejected)]
+    [InlineData((HttpStatusCode)423, "ErrorItemLocked", CategoryOutcomeStatus.GraphRejected)]
     public async Task Maps_graph_errors_and_surfaces_request_id(HttpStatusCode status, string code, CategoryOutcomeStatus expected)
     {
         _graph.RespondError(status, code, requestId: "req-123");

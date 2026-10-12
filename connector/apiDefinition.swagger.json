@@ -35,13 +35,14 @@
         ],
         "responses": {
           "200": { "description": "Categories applied", "schema": { "$ref": "#/definitions/SetCategoryResponse" } },
-          "400": { "description": "Invalid request", "schema": { "$ref": "#/definitions/Problem" } },
+          "400": { "description": "Invalid request, or Microsoft Graph rejected it permanently", "schema": { "$ref": "#/definitions/Problem" } },
           "401": { "description": "Not authenticated" },
           "403": { "description": "Caller's app is not allowed" },
           "404": { "description": "Message not found in the shared mailbox", "schema": { "$ref": "#/definitions/Problem" } },
           "409": { "description": "internetMessageId matched more than one message", "schema": { "$ref": "#/definitions/Problem" } },
+          "500": { "description": "App Service Authentication is disabled (the function refuses requests until it is restored), or an unexpected error", "schema": { "$ref": "#/definitions/Problem" } },
           "502": { "description": "The function's identity cannot access the mailbox (configuration problem)", "schema": { "$ref": "#/definitions/Problem" } },
-          "503": { "description": "Microsoft Graph unavailable after retries; safe to retry", "schema": { "$ref": "#/definitions/Problem" } }
+          "503": { "description": "Microsoft Graph throttled or unavailable after retries, or the 90-second deadline was reached; safe to retry", "schema": { "$ref": "#/definitions/Problem" } }
         }
       }
     }
@@ -54,13 +55,14 @@
         "messageId": {
           "type": "string",
           "x-ms-summary": "Message Id",
-          "description": "The 'Message Id' from the 'When a new email arrives in a shared mailbox (V2)' trigger."
+          "description": "The 'Message Id' from the 'When a new email arrives in a shared mailbox (V2)' trigger.",
+          "x-ms-visibility": "important"
         },
         "internetMessageId": {
           "type": "string",
           "x-ms-summary": "Internet Message Id",
-          "description": "Use instead of Message Id if the message may have been moved to another folder.",
-          "x-ms-visibility": "advanced"
+          "description": "Recommended: pass the trigger's 'Internet Message Id' as well as Message Id. Used to find the message if it has been moved to another folder (which changes its Message Id).",
+          "x-ms-visibility": "important"
         },
         "categories": {
           "type": "array",

@@ -27,4 +27,52 @@ public sealed class SecurityOptions
     /// This is defence in depth: Easy Auth should already have rejected them. Set to false only for local development.
     /// </summary>
     public bool RequireAuthenticatedCaller { get; set; } = true;
+
+    /// <summary>
+    /// When true (the default), the function refuses every request in Azure unless App Service Authentication is
+    /// enabled. Without Easy Auth the platform no longer strips X-MS-CLIENT-PRINCIPAL-* headers, so a caller could
+    /// forge the principal that <see cref="RequireAuthenticatedCaller"/> checks for. Ignored when running locally.
+    /// </summary>
+    public bool RequireEasyAuthEnabled { get; set; } = true;
+}
+
+/// <summary>Bound from the "Processing" configuration section.</summary>
+public sealed class ProcessingOptions
+{
+    public const string SectionName = "Processing";
+
+    /// <summary>
+    /// Overall time budget for one invocation, including Graph retries. Must stay below Power Automate's 120-second
+    /// limit for synchronous connector calls, so the caller gets a clean 503 rather than its own timeout (after which
+    /// it retries while the first invocation is still running).
+    /// </summary>
+    [Range(10, 110)]
+    public int DeadlineSeconds { get; set; } = 90;
+
+    /// <summary>
+    /// Maximum concurrent Graph requests per instance. Graph allows 4 concurrent requests per app per mailbox;
+    /// gating here keeps bursts queued in-process instead of being throttled (429) by Graph.
+    /// </summary>
+    [Range(1, 16)]
+    public int MaxConcurrentGraphRequests { get; set; } = 4;
+}
+
+/// <summary>Facts about the hosting platform, read once from App Service environment variables.</summary>
+/// <param name="RunningInAzure">True when hosted in Azure (any of <see cref="AzureHostMarkers"/> is set).</param>
+/// <param name="EasyAuthEnabled">True when App Service Authentication is enabled (WEBSITE_AUTH_ENABLED=True).</param>
+public sealed record PlatformInfo(bool RunningInAzure, bool EasyAuthEnabled)
+{
+    // Which of these is present differs between hosting plans (App Service/Windows, Linux Consumption, Flex),
+    // so check several. None is set by Core Tools locally. The deploy smoke test asserts the result via /api/health.
+    internal static readonly string[] AzureHostMarkers = ["WEBSITE_INSTANCE_ID", "CONTAINER_NAME", "WEBSITE_SKU"];
+
+    public static PlatformInfo FromEnvironment() => FromVariables(Environment.GetEnvironmentVariable);
+
+    internal static PlatformInfo FromVariables(Func<string, string?> getVariable) => new(
+        AzureHostMarkers.Any(name => !string.IsNullOrEmpty(getVariable(name))),
+        string.Equals(getVariable("WEBSITE_AUTH_ENABLED"), "True", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>True when the fail-closed check applies: in Azure, required, and Easy Auth is not reported as enabled.</summary>
+    public bool RefusesRequests(SecurityOptions security)
+        => RunningInAzure && security.RequireEasyAuthEnabled && !EasyAuthEnabled;
 }

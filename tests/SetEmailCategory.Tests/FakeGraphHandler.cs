@@ -29,6 +29,12 @@ internal sealed class FakeGraphHandler : HttpMessageHandler
         return this;
     }
 
+    public FakeGraphHandler RespondRaw(HttpStatusCode status, string content, string mediaType = "application/json")
+    {
+        _responses.Enqueue(_ => new HttpResponseMessage(status) { Content = new StringContent(content, Encoding.UTF8, mediaType) });
+        return this;
+    }
+
     public FakeGraphHandler RespondMessage(string id, string[] categories, string etag = "W/\"etag-1\"")
         => Respond(HttpStatusCode.OK, new Dictionary<string, object> { ["id"] = id, ["categories"] = categories, ["@odata.etag"] = etag });
 
@@ -37,6 +43,8 @@ internal sealed class FakeGraphHandler : HttpMessageHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested(); // as a real network handler would
+
         var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
         var ifMatch = request.Headers.TryGetValues("If-Match", out var values) ? values.Single() : null;
         Requests.Add((request.Method, request.RequestUri!.PathAndQuery, body, ifMatch));

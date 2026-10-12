@@ -22,7 +22,6 @@ permissions:
   contents: read
 
 env:
-  DOTNET_VERSION: '10.0.x'
   FUNCTIONS_PROJECT: src/SetEmailCategory/SetEmailCategory.csproj
 
 jobs:
@@ -31,9 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Latest patched 10.0 SDK; global.json (rollForward: latestFeature) pins the major version.
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+          dotnet-version: '10.0.x'
 
       - name: Test
         run: dotnet test SetEmailCategory.sln --configuration Release
@@ -120,11 +120,19 @@ jobs:
         run: |
           # Wait for the new build (identified by commit SHA in its version) to be serving.
           for i in $(seq 1 20); do
-            version=$(curl -fsS "https://$HOST/api/health" | jq -r .version || true)
-            if [[ "$version" == *"${{ github.sha }}"* ]]; then echo "Serving $version"; break; fi
+            health=$(curl -fsS "https://$HOST/api/health" || echo '{}')
+            version=$(jq -r '.version // empty' <<< "$health")
+            if [[ "$version" == *"${{ github.sha }}"* ]]; then echo "Serving $version: $health"; break; fi
             echo "Waiting for new version (got '$version')"; sleep 15
           done
           [[ "$version" == *"${{ github.sha }}"* ]] || { echo "::error::New version did not come up"; exit 1; }
+
+          # The app must recognise it is in Azure (managed identity + fail-closed check depend on it) and must not be
+          # refusing requests (it refuses everything if App Service Authentication is not reported as enabled).
+          [[ "$(jq -r .runningInAzure <<< "$health")" == "true" ]] || {
+            echo "::error::App did not detect it is running in Azure. Check PlatformInfo.AzureHostMarkers against the app's environment variables."; exit 1; }
+          [[ "$(jq -r .acceptingRequests <<< "$health")" == "true" ]] || {
+            echo "::error::App is refusing requests: WEBSITE_AUTH_ENABLED is not True. See RUNBOOK troubleshooting '500 Service misconfigured'."; exit 1; }
 
           # Authentication must be enforced.
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "https://$HOST/api/messages/categories" \

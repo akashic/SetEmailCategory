@@ -23,24 +23,32 @@ Power Automate flow ──(custom connector, Entra ID OAuth)──► Azure Func
 
 ```json
 {
-  "messageId": "AAMkAD...",          // from the shared-mailbox trigger; or use internetMessageId
-  "internetMessageId": "<...@...>",  // optional; finds the message even after it was moved
+  "messageId": "AAMkAD...",          // "Message Id" from the shared-mailbox trigger
+  "internetMessageId": "<...@...>",  // recommended as well: used if the message was moved (angle brackets optional)
   "categories": ["Invoice", "Urgent"],
   "mode": "add"                      // add (default) | replace | remove
 }
 ```
 
-| Status | Meaning | Retry? |
+Supply `messageId`, `internetMessageId`, or (recommended) both. Outlook message IDs change when a message is moved between folders, which can easily happen between the email arriving and the polling trigger firing. If `messageId` no longer finds the message, the function looks it up by `internetMessageId`.
+
+| Status | Meaning | Does a retry help? |
 |---|---|---|
 | 200 | `{ messageId, categories, changed }`. `changed: false` means the message already had the categories. | – |
-| 400 | Invalid input (details in the `application/problem+json` body) | No |
+| 400 | Invalid input, or Graph rejected the request permanently (details in the `application/problem+json` body) | No |
 | 401 / 403 | Not authenticated, or the calling app isn't allowed | No |
-| 404 | Message not in the shared mailbox (deleted or moved) | No |
+| 404 | Message not in the shared mailbox (deleted, or moved and no `internetMessageId` supplied) | No |
 | 409 | `internetMessageId` matched more than one message | No |
-| 502 | The function's identity can't access the mailbox (a configuration problem) | No |
-| 503 | Microsoft Graph unavailable after retries | Yes |
+| 500 | App Service Authentication is disabled, so the function refuses all requests (fails closed), or an unexpected error | Only once fixed |
+| 502 | The function's identity can't access the mailbox (configuration; up to 2 h after granting access) | Yes, during propagation |
+| 503 | Graph throttled or unavailable after retries, or the 90-second deadline was reached | Yes |
 
-The call is idempotent, so it's safe to retry. Concurrent updates are protected with ETags (`If-Match`). Throttling (429) and transient 5xx errors from Graph are retried, honouring `Retry-After`.
+Power Automate's default retry policy retries **every** 5xx (408 and 429 too), so 500/502/503 are all retried automatically; 4xx are not.
+
+The call is idempotent, so retries are safe. Each invocation finishes within 90 seconds, inside Power Automate's 120-second limit for synchronous calls. Inside that budget:
+- Graph throttling (429) and transient 5xx errors are retried, honouring `Retry-After`.
+- Graph requests are limited to 4 at a time per instance (Graph's per-mailbox limit).
+- Concurrent updates to the same message are detected (`If-Match`, and Exchange 409 conflicts) and re-applied.
 
 ## Repository layout
 

@@ -36,15 +36,25 @@ param allowedClientApplicationIds array
 @allowed([512, 2048, 4096])
 param instanceMemoryMB int = 512
 
-@description('Maximum instances. Graph allows 4 concurrent requests per app per mailbox, so keep instances x concurrency near 4.')
-@minValue(1)
+@description('Maximum instances. Microsoft advises at least 40 for HTTP apps: below that, bursts beyond capacity are rejected by the platform before reaching the code. Graph concurrency is limited separately (graphConcurrencyPerInstance).')
+@minValue(40)
 @maxValue(1000)
-param maximumInstanceCount int = 2
+param maximumInstanceCount int = 40
 
-@description('Concurrent HTTP requests per instance.')
+@description('Concurrent HTTP requests per instance. Requests are I/O-bound, so a higher value means fewer instances and fewer cold starts; excess requests wait in-process for a Graph slot.')
 @minValue(1)
 @maxValue(1000)
-param httpPerInstanceConcurrency int = 2
+param httpPerInstanceConcurrency int = 16
+
+@description('Concurrent Microsoft Graph requests per instance. Graph allows 4 per app per mailbox; anything above that is throttled (429) and retried.')
+@minValue(1)
+@maxValue(16)
+param graphConcurrencyPerInstance int = 4
+
+@description('Per-invocation time budget in seconds, including Graph retries. Must stay below Power Automate\'s 120-second limit for synchronous calls.')
+@minValue(10)
+@maxValue(110)
+param requestDeadlineSeconds int = 90
 
 @description('Always-ready instances for the HTTP trigger group. 0 = scale to zero (cheapest, cold starts); 1 = no cold starts (billed continuously).')
 @minValue(0)
@@ -147,6 +157,8 @@ module functionApp 'modules/functionApp.bicep' = {
     maximumInstanceCount: maximumInstanceCount
     httpPerInstanceConcurrency: httpPerInstanceConcurrency
     alwaysReadyInstances: alwaysReadyInstances
+    graphConcurrencyPerInstance: graphConcurrencyPerInstance
+    requestDeadlineSeconds: requestDeadlineSeconds
     appSubnetId: enablePrivateNetworking ? network!.outputs.appSubnetId : ''
     sharedMailboxAddress: sharedMailboxAddress
     apiAppClientId: apiAppClientId

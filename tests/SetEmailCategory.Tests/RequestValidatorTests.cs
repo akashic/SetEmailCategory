@@ -60,6 +60,25 @@ public class RequestValidatorTests
         Assert.Equal(valid, result is not null);
     }
 
+    [Theory]
+    [InlineData("abc@contoso.com", "<abc@contoso.com>")]
+    [InlineData("<abc@contoso.com>", "<abc@contoso.com>")]
+    [InlineData("  <abc@contoso.com  ", "<abc@contoso.com>")]
+    [InlineData("abc@contoso.com>", "<abc@contoso.com>")]
+    [InlineData("< abc@contoso.com >", "<abc@contoso.com>")]
+    [InlineData("<>", null)]
+    [InlineData("   ", null)]
+    [InlineData(null, null)]
+    public void Normalizes_internet_message_id_to_bracketed_form(string? input, string? expected)
+        => Assert.Equal(expected, RequestValidator.NormalizeInternetMessageId(input));
+
+    [Fact]
+    public void Validate_applies_internet_message_id_normalization()
+    {
+        var result = RequestValidator.Validate(new SetCategoryRequest(null, "abc@contoso.com", ["A"], null), out _);
+        Assert.Equal("<abc@contoso.com>", result!.InternetMessageId);
+    }
+
     [Fact]
     public void Missing_categories_is_rejected()
     {

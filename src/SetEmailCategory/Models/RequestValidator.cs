@@ -90,9 +90,19 @@ public static class RequestValidator
         return problems.Count == 0
             ? new ValidatedRequest(
                 string.IsNullOrEmpty(messageId) ? null : messageId,
-                string.IsNullOrEmpty(internetMessageId) ? null : internetMessageId,
+                NormalizeInternetMessageId(internetMessageId),
                 categories,
                 mode)
             : null;
+    }
+
+    /// <summary>
+    /// Graph stores internetMessageId with angle brackets ("&lt;id@host&gt;") and the $filter match is exact,
+    /// so add them when a caller passes the bare value (or only one of them).
+    /// </summary>
+    internal static string? NormalizeInternetMessageId(string? value)
+    {
+        var bare = value?.Trim().TrimStart('<').TrimEnd('>').Trim();
+        return string.IsNullOrEmpty(bare) ? null : $"<{bare}>";
     }
 }
