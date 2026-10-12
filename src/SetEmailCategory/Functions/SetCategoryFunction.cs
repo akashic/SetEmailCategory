@@ -12,6 +12,7 @@ namespace SetEmailCategory.Functions;
 public sealed partial class SetCategoryFunction(
     IMailCategoryService service,
     IOptions<SecurityOptions> security,
+    PlatformInfo platform,
     ILogger<SetCategoryFunction> logger)
 {
     internal static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -39,6 +40,15 @@ public sealed partial class SetCategoryFunction(
             ["CallerName"] = callerName,
             ["CorrelationId"] = correlationId,
         });
+
+        // Fail closed: if Easy Auth has been switched off, the principal header below could be forged.
+        // 500 rather than 503 so callers' retry policies don't keep hammering a misconfiguration.
+        if (platform.RunningInAzure && security.Value.RequireEasyAuthEnabled && !platform.EasyAuthEnabled)
+        {
+            LogEasyAuthDisabled();
+            return Problem(StatusCodes.Status500InternalServerError, "Service misconfigured",
+                "App Service Authentication is not enabled on this function app, so requests are refused.");
+        }
 
         if (security.Value.RequireAuthenticatedCaller && string.IsNullOrEmpty(callerId))
         {
@@ -91,6 +101,9 @@ public sealed partial class SetCategoryFunction(
             ContentTypes = { "application/problem+json" },
         };
     }
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "Refused request: App Service Authentication (Easy Auth) is not enabled. Redeploy the Bicep template to restore authsettingsV2")]
+    private partial void LogEasyAuthDisabled();
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Rejected request with no authenticated principal; check that App Service Authentication is enabled")]
     private partial void LogUnauthenticated();

@@ -34,10 +34,43 @@ public class SetCategoryFunctionTests
         return context.Request;
     }
 
-    private static SetCategoryFunction CreateFunction(IMailCategoryService service, bool requireAuth = true) => new(
+    private static SetCategoryFunction CreateFunction(
+        IMailCategoryService service,
+        bool requireAuth = true,
+        PlatformInfo? platform = null,
+        bool requireEasyAuthEnabled = true) => new(
         service,
-        Options.Create(new SecurityOptions { RequireAuthenticatedCaller = requireAuth }),
+        Options.Create(new SecurityOptions { RequireAuthenticatedCaller = requireAuth, RequireEasyAuthEnabled = requireEasyAuthEnabled }),
+        platform ?? new PlatformInfo(RunningInAzure: true, EasyAuthEnabled: true),
         NullLogger<SetCategoryFunction>.Instance);
+
+    private const string ValidBody = """{"messageId":"m","categories":["A"]}""";
+
+    [Fact]
+    public async Task Fails_closed_in_azure_when_easy_auth_is_disabled()
+    {
+        var service = new StubService(Ok);
+        var function = CreateFunction(service, platform: new PlatformInfo(RunningInAzure: true, EasyAuthEnabled: false));
+
+        // Even a request carrying a (potentially forged) principal header is refused.
+        var result = await function.Run(CreateRequest(ValidBody), default);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, Assert.IsType<ObjectResult>(result).StatusCode);
+        Assert.Null(service.Received);
+    }
+
+    [Theory]
+    [InlineData(true, true, true)]    // Azure, Easy Auth on
+    [InlineData(false, false, true)]  // local development: check doesn't apply
+    [InlineData(true, false, false)]  // Azure, Easy Auth off, check explicitly disabled by ops
+    public async Task Easy_auth_check_allows_request(bool runningInAzure, bool easyAuthEnabled, bool requireEasyAuthEnabled)
+    {
+        var function = CreateFunction(new StubService(Ok),
+            platform: new PlatformInfo(runningInAzure, easyAuthEnabled),
+            requireEasyAuthEnabled: requireEasyAuthEnabled);
+
+        Assert.IsType<OkObjectResult>(await function.Run(CreateRequest(ValidBody), default));
+    }
 
     private static readonly CategoryOutcome Ok = new(CategoryOutcomeStatus.Success, "msg-1", ["Invoice"], Changed: true);
 

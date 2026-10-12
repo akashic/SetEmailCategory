@@ -82,8 +82,10 @@ public sealed partial class MailCategoryService(
 
     private async Task<CategoryOutcome> ReplaceAsync(string messageId, IReadOnlyList<string> categories, CancellationToken ct)
     {
-        var updated = await PatchCategoriesAsync(messageId, categories, etag: null, ct);
-        LogUpdated(messageId, CategoryMode.Replace, updated!.Categories.Count);
+        // Without If-Match there is no 412, so a null (precondition failed) result is impossible here.
+        var updated = await PatchCategoriesAsync(messageId, categories, etag: null, ct)
+            ?? throw new InvalidOperationException("Unexpected 412 from an unconditional PATCH.");
+        LogUpdated(messageId, CategoryMode.Replace, updated.Categories.Count);
         return new CategoryOutcome(CategoryOutcomeStatus.Success, updated.Id, updated.Categories, Changed: true);
     }
 
@@ -171,7 +173,7 @@ public sealed partial class MailCategoryService(
         return (await response.Content.ReadFromJsonAsync<GraphMessage>(ct))!;
     }
 
-    /// <summary>PATCHes the categories. Returns null when <paramref name="etag"/> no longer matches (HTTP 412).</summary>
+    /// <summary>PATCHes the categories. Returns null only when <paramref name="etag"/> no longer matches (HTTP 412).</summary>
     private async Task<GraphMessage?> PatchCategoriesAsync(string messageId, IReadOnlyList<string> categories, string? etag, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Patch, $"{_mailboxPath}/{Uri.EscapeDataString(messageId)}")
@@ -190,7 +192,12 @@ public sealed partial class MailCategoryService(
         }
 
         await EnsureSuccessAsync(response, ct);
-        return await response.Content.ReadFromJsonAsync<GraphMessage>(ct);
+
+        // Graph documents 200 with the updated message, but the write has succeeded either way, so an empty
+        // body (e.g. 204) must not be mistaken for the 412 "changed underneath us" case above.
+        var body = await response.Content.ReadAsStringAsync(ct);
+        var updated = string.IsNullOrWhiteSpace(body) ? null : JsonSerializer.Deserialize<GraphMessage>(body);
+        return updated ?? new GraphMessage { Id = messageId, Categories = [.. categories] };
     }
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken ct)

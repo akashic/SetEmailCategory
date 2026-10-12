@@ -73,6 +73,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         { name: 'APPLICATIONINSIGHTS_AUTHENTICATION_STRING', value: 'Authorization=AAD' }
         { name: 'SharedMailbox__Address', value: sharedMailboxAddress }
         { name: 'Security__RequireAuthenticatedCaller', value: 'true' }
+        // Refuse all requests if App Service Authentication is ever disabled (see docs/RUNBOOK.md troubleshooting).
+        { name: 'Security__RequireEasyAuthEnabled', value: 'true' }
       ]
     }
     functionAppConfig: {

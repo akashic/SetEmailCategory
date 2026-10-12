@@ -78,6 +78,32 @@ public class MailCategoryServiceTests
     }
 
     [Fact]
+    public async Task Replace_tolerates_empty_patch_response()
+    {
+        _graph.Respond(HttpStatusCode.NoContent);
+
+        var outcome = await CreateService().ApplyAsync(Request(CategoryMode.Replace, "Only"), default);
+
+        Assert.Equal(CategoryOutcomeStatus.Success, outcome.Status);
+        Assert.Equal("msg-1", outcome.MessageId);
+        Assert.Equal(["Only"], outcome.Categories);
+    }
+
+    [Fact]
+    public async Task Add_treats_empty_patch_response_as_success_not_as_a_conflict()
+    {
+        _graph.RespondMessage("msg-1", ["Existing"])
+              .Respond(HttpStatusCode.NoContent);
+
+        var outcome = await CreateService().ApplyAsync(Request(CategoryMode.Add, "Invoice"), default);
+
+        Assert.Equal(CategoryOutcomeStatus.Success, outcome.Status);
+        Assert.True(outcome.Changed);
+        Assert.Equal(["Existing", "Invoice"], outcome.Categories);
+        Assert.Equal(2, _graph.Requests.Count); // GET + PATCH, no concurrency retry
+    }
+
+    [Fact]
     public async Task Retries_read_modify_write_when_message_changed_concurrently()
     {
         _graph.RespondMessage("msg-1", ["A"], etag: "W/\"v1\"")

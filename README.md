@@ -24,7 +24,7 @@ Power Automate flow ──(custom connector, Entra ID OAuth)──► Azure Func
 ```json
 {
   "messageId": "AAMkAD...",          // from the shared-mailbox trigger; or use internetMessageId
-  "internetMessageId": "<...@...>",  // optional; finds the message even after it was moved
+  "internetMessageId": "<...@...>",  // optional; finds the message even after it was moved (angle brackets optional)
   "categories": ["Invoice", "Urgent"],
   "mode": "add"                      // add (default) | replace | remove
 }
@@ -37,6 +37,7 @@ Power Automate flow ──(custom connector, Entra ID OAuth)──► Azure Func
 | 401 / 403 | Not authenticated, or the calling app isn't allowed | No |
 | 404 | Message not in the shared mailbox (deleted or moved) | No |
 | 409 | `internetMessageId` matched more than one message | No |
+| 500 | App Service Authentication is disabled, so the function refuses all requests (fails closed) | No |
 | 502 | The function's identity can't access the mailbox (a configuration problem) | No |
 | 503 | Microsoft Graph unavailable after retries | Yes |
 

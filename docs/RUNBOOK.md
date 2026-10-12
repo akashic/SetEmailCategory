@@ -158,7 +158,7 @@ The script:
 
 ## Phase 8: End-to-end verification
 
-- [ ] Send a test email to the shared mailbox. The flow runs, the action returns 200, and Outlook shows the category.
+- [ ] Send a test email to the shared mailbox. The flow runs, the action returns 200, and Outlook shows the category. If it returns **500 "Service misconfigured"** instead, see the troubleshooting row for it: this first authenticated call is what proves the platform reports Easy Auth as enabled.
 - [ ] Re-run the same flow run. It returns 200 with `changed: false`, which shows the call is idempotent.
 - [ ] Call the connector with a made-up message ID. It returns 404.
 - [ ] In Application Insights → **Transaction search**, find the request by its correlation ID.
@@ -228,6 +228,7 @@ Set `enablePrivateNetworking = true` to:
 | `AADSTS50011` redirect URI mismatch | The connector's unique redirect URI isn't registered | Phase 6, step 4. |
 | 502 "Mailbox access denied" | Exchange RBAC missing, still propagating, or the mailbox address changed | Wait up to 2 h after Phase 5. Re-run `Grant-MailboxAccess.ps1`; it verifies the scope. |
 | 404 "Message not found" | Message deleted or moved after the trigger fired | Pass `internetMessageId` instead. |
+| 500 "Service misconfigured" | App Service Authentication is off, so the function refuses every request rather than run unprotected | Redeploy the Bicep to restore `authsettingsV2`. If Authentication **is** on in the portal, the platform may not be setting `WEBSITE_AUTH_ENABLED` on Flex Consumption; check the app's environment variables, and only then set `Security__RequireEasyAuthEnabled = false` in `functionApp.bicep`. |
 | 400 "contains a comma" | Categories passed as `"A, B"` | Use one array item per category. |
 | 503 | Graph throttling or outage persisted through retries | The flow retry policy handles it. If it's persistent, check [Microsoft 365 service health](https://admin.microsoft.com/servicehealth). |
 | Smoke test "new version did not come up" | App failed to start, often from a missing `SharedMailbox__Address` | Application Insights → Failures / traces for startup exceptions. |
@@ -252,7 +253,7 @@ Set `enablePrivateNetworking = true` to:
 |---|---|
 | Caller authentication | Entra ID OAuth (delegated) through the custom connector. App Service Authentication validates issuer, audience and calling app before code runs. |
 | Caller authorisation | `allowedApplications` = connector app only. Optional assignment-required group on the API app. |
-| Defence in depth | The function also rejects requests without an Easy Auth principal header, which the platform strips from client requests. |
+| Defence in depth | The function also rejects requests without an Easy Auth principal header, which the platform strips from client requests. It fails closed: if App Service Authentication is ever disabled, it refuses every request. |
 | Mailbox access | System-assigned managed identity. Exchange RBAC for Applications grants `Mail.ReadWrite` on **one** mailbox, and **no** Entra Graph permission (the script enforces this). |
 | Secrets | None in Azure or GitHub. Storage and App Insights use Entra ID. Deployment uses OIDC federation. One OAuth client secret is held by Power Platform and rotated per the procedure above. |
 | Deployment privilege | RG-scoped Contributor, plus RBAC Administrator constrained by ABAC to four data roles for service principals. |

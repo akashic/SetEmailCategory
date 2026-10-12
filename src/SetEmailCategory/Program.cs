@@ -17,11 +17,14 @@ var builder = FunctionsApplication.CreateBuilder(args);
 
 builder.ConfigureFunctionsWebApplication();
 
+var platform = PlatformInfo.FromEnvironment();
+builder.Services.AddSingleton(platform);
+
 // In Azure, use the app's system-assigned managed identity explicitly (deterministic, no credential probing).
 // Locally, DefaultAzureCredential picks up AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET for a dev app registration.
-TokenCredential credential = string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID"))
-    ? new DefaultAzureCredential()
-    : new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned);
+TokenCredential credential = platform.RunningInAzure
+    ? new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned)
+    : new DefaultAzureCredential();
 builder.Services.AddSingleton(credential);
 
 if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING")))

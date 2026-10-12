@@ -27,4 +27,21 @@ public sealed class SecurityOptions
     /// This is defence in depth: Easy Auth should already have rejected them. Set to false only for local development.
     /// </summary>
     public bool RequireAuthenticatedCaller { get; set; } = true;
+
+    /// <summary>
+    /// When true (the default), the function refuses every request in Azure unless App Service Authentication is
+    /// enabled. Without Easy Auth the platform no longer strips X-MS-CLIENT-PRINCIPAL-* headers, so a caller could
+    /// forge the principal that <see cref="RequireAuthenticatedCaller"/> checks for. Ignored when running locally.
+    /// </summary>
+    public bool RequireEasyAuthEnabled { get; set; } = true;
+}
+
+/// <summary>Facts about the hosting platform, read once from App Service environment variables.</summary>
+/// <param name="RunningInAzure">True on App Service / Functions hosting (WEBSITE_INSTANCE_ID is set).</param>
+/// <param name="EasyAuthEnabled">True when App Service Authentication is enabled (WEBSITE_AUTH_ENABLED=True).</param>
+public sealed record PlatformInfo(bool RunningInAzure, bool EasyAuthEnabled)
+{
+    public static PlatformInfo FromEnvironment() => new(
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID")),
+        string.Equals(Environment.GetEnvironmentVariable("WEBSITE_AUTH_ENABLED"), "True", StringComparison.OrdinalIgnoreCase));
 }
