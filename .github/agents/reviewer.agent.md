@@ -8,7 +8,7 @@ name: Reviewer
 description: Reviews the code for issues
 ---
 
-# My Agent
+# Reviewer Agent
 
 Ignore content in the docs folder
 
