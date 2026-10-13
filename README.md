@@ -17,6 +17,29 @@ Power Automate flow ──(custom connector, Entra ID OAuth)──► Azure Func
 - **What it can touch:** the function's managed identity has **no** tenant-wide Graph permission. Exchange Online RBAC for Applications grants `Mail.ReadWrite` on that one shared mailbox, and nothing else.
 - **No stored secrets in Azure or GitHub:** storage and Application Insights use the managed identity, and deployment uses GitHub OIDC. The only secret is the connector's OAuth client secret, which lives in Power Platform.
 
+## Azure resources
+
+The Bicep deployment creates the following resources in the target resource group:
+
+| Resource | Purpose |
+|---|---|
+| **Function App** | Runs the HTTP API, validates caller tokens with App Service Authentication (Easy Auth), and uses a system-assigned managed identity for Azure Storage, Application Insights, and Microsoft Graph access. |
+| **Flex Consumption plan** | Provides the serverless hosting and scaling configuration for the Function App. |
+| **Storage account** | Supplies the Azure Functions host storage and the blob container used for the function deployment package. The app accesses it with its managed identity; shared-key access is disabled. |
+| **Application Insights** | Collects application telemetry and provides the failure data used for troubleshooting and alerting. It sends data to the Log Analytics workspace and accepts ingestion using Entra ID authentication. |
+| **Log Analytics workspace** | Stores Application Insights telemetry and Function App logs for querying, with configurable retention. |
+
+Optional resources, controlled by deployment parameters:
+
+| Resource | When deployed | Purpose |
+|---|---|---|
+| **Virtual network and subnets** | `enablePrivateNetworking` is `true` | Provides a delegated subnet for Function App VNet integration and a separate subnet for private endpoints. |
+| **Storage private endpoints** | `enablePrivateNetworking` is `true` | Provide private connectivity from the VNet to the storage account's blob, queue, and table services; public network access to storage is disabled. |
+| **Private DNS zones, VNet links, and endpoint DNS zone groups** | Private networking is enabled and `createPrivateDnsZones` is `true` | Resolve the storage private endpoints from the VNet. Set `createPrivateDnsZones` to `false` when private DNS is managed centrally. |
+| **Monitoring action group and metric alert** | `alertEmailAddresses` is non-empty | Sends email notifications when Application Insights reports failed requests. |
+
+The deployment also configures managed-identity role assignments, Function App authentication and diagnostics, and publishing-credential policies. Entra app registrations and Exchange Online mailbox scoping are set up separately using the scripts described in the [runbook](docs/RUNBOOK.md).
+
 ## API
 
 `POST /api/messages/categories`
