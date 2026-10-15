@@ -7,14 +7,18 @@
 .DESCRIPTION
     - Creates the resource group if it does not exist.
     - Creates a user-assigned managed identity with a federated credential trusted only for
-      repo:<owner>/<repo>:environment:<env> (so only jobs running in that GitHub environment can deploy).
+      <subject prefix>:environment:<env> (so only jobs running in that GitHub environment can deploy).
+      The prefix is read from the repo's OIDC settings, so it matches whether GitHub issues the name-based
+      subject (repo:<owner>/<repo>) or the immutable one (repo:<owner>@<owner-id>/<repo>@<repo-id>).
+      An existing name-based credential is migrated, and removed once the immutable one exists.
     - Grants it, on the resource group only:
         * Contributor
         * Role Based Access Control Administrator, constrained by an ABAC condition so it can ONLY assign the
           four data-plane roles the Function App needs, and only to service principals.
     - Optionally writes the GitHub environment variables with the gh CLI.
 
-    Requires: Azure CLI signed in as Owner (or User Access Administrator + Contributor) on the subscription/RG.
+    Requires: Azure CLI signed in as Owner (or User Access Administrator + Contributor) on the subscription/RG,
+    and the gh CLI signed in with read access to the repo (or pass -OidcSubjectPrefix).
 
 .EXAMPLE
     ./Setup-GitHubOidc.ps1 -SubscriptionId 0000... -ResourceGroup rg-setemailcat-prod -Location uksouth `
@@ -28,6 +32,11 @@ param(
     [Parameter(Mandatory)] [ValidatePattern('^[^/]+/[^/]+$')] [string] $GitHubRepository,
     [ValidateSet('dev', 'test', 'prod')] [string] $GitHubEnvironment = 'prod',
     [string] $IdentityName = "id-github-setemailcat-$GitHubEnvironment",
+
+    # Subject prefix GitHub puts in the OIDC token, e.g. repo:contoso@123/SetEmailCategory@456. Read from
+    # GET repos/<repo>/actions/oidc/customization/sub when omitted; pass it only if gh isn't available.
+    [ValidatePattern('^repo:')] [string] $OidcSubjectPrefix,
+
     [switch] $SetGitHubVariables
 )
 
@@ -59,16 +68,51 @@ if (-not $identity) {
     $identity = az identity create -g $ResourceGroup -n $IdentityName -l $Location --only-show-errors | ConvertFrom-Json
 }
 
-$subject = "repo:$($GitHubRepository):environment:$GitHubEnvironment"
-$fedName = "github-$GitHubEnvironment"
-$fed = az identity federated-credential list -g $ResourceGroup --identity-name $IdentityName | ConvertFrom-Json | Where-Object name -eq $fedName
-if (-not $fed) {
-    Write-Host "Adding federated credential for $subject"
-    az identity federated-credential create -g $ResourceGroup --identity-name $IdentityName --name $fedName `
-        --issuer 'https://token.actions.githubusercontent.com' --subject $subject --audiences 'api://AzureADTokenExchange' --only-show-errors | Out-Null
+# The subject GitHub issues depends on the repo's OIDC settings: name-based (repo:owner/repo) or immutable
+# (repo:owner@id/repo@id), the default for repos created or renamed since July 2026. Entra matches it exactly.
+function Get-OidcSubjectPrefix {
+    try { $sub = gh api "repos/$GitHubRepository/actions/oidc/customization/sub" | ConvertFrom-Json }
+    catch { throw "Couldn't read the OIDC subject settings of $GitHubRepository with gh ($_). Sign in with 'gh auth login', or pass -OidcSubjectPrefix." }
+    if (-not $sub.use_default) {
+        throw "$GitHubRepository uses a custom OIDC subject template. Create the federated credential by hand, matching the sub claim it produces."
+    }
+    if ($sub.PSObject.Properties['sub_claim_prefix'] -and $sub.sub_claim_prefix) { return $sub.sub_claim_prefix }
+    if (-not ($sub.PSObject.Properties['use_immutable_subject'] -and $sub.use_immutable_subject)) { return "repo:$GitHubRepository" }
+    $repo = gh api "repos/$GitHubRepository" | ConvertFrom-Json
+    return "repo:$($repo.owner.login)@$($repo.owner.id)/$($repo.name)@$($repo.id)"
 }
-elseif ($fed.subject -ne $subject) {
-    throw "Federated credential '$fedName' exists with subject '$($fed.subject)'."
+
+if (-not $OidcSubjectPrefix) { $OidcSubjectPrefix = Get-OidcSubjectPrefix }
+$subject = "$($OidcSubjectPrefix):environment:$GitHubEnvironment"
+$legacySubject = "repo:$($GitHubRepository):environment:$GitHubEnvironment"
+$fedName = "github-$GitHubEnvironment"
+$fedArgs = @('-g', $ResourceGroup, '--identity-name', $IdentityName, '--only-show-errors')
+$issuerArgs = @('--issuer', 'https://token.actions.githubusercontent.com', '--subject', $subject, '--audiences', 'api://AzureADTokenExchange')
+
+$creds = @(az identity federated-credential list @fedArgs | ConvertFrom-Json)
+if (-not ($creds | Where-Object subject -ceq $subject)) {
+    $named = $creds | Where-Object name -eq $fedName
+    if (-not $named) {
+        Write-Host "Adding federated credential for $subject"
+        az identity federated-credential create @fedArgs --name $fedName @issuerArgs | Out-Null
+    }
+    elseif ($named.subject -eq $legacySubject) {
+        Write-Host "Updating federated credential '$fedName' from $($named.subject) to $subject"
+        az identity federated-credential update @fedArgs --name $fedName @issuerArgs | Out-Null
+    }
+    else {
+        throw "Federated credential '$fedName' exists with subject '$($named.subject)'."
+    }
+}
+
+# A name-based credential left beside the immutable one would trust any future repo given this name.
+if ($subject -cne $legacySubject) {
+    $creds = @(az identity federated-credential list @fedArgs | ConvertFrom-Json)
+    foreach ($stale in $creds | Where-Object { $_.subject -eq $legacySubject -and $_.subject -cne $subject }) {
+        if ($PSCmdlet.ShouldProcess($stale.name, "Remove name-based federated credential ($legacySubject)")) {
+            az identity federated-credential delete @fedArgs --name $stale.name --yes | Out-Null
+        }
+    }
 }
 
 function Grant-Role {
