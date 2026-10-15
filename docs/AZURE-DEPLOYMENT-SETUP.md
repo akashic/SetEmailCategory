@@ -8,8 +8,6 @@ This guide lists everything that has to be configured before `.github/workflows/
 
 [RUNBOOK.md](RUNBOOK.md) is the step-by-step procedure (phases 0–8) and covers day-2 operations. This guide is the reference behind it: what each setting is, where its value comes from, how to set it with or without the scripts, and how to check it. The runbook phase is given for each item.
 
-> **Read [Known issue: OIDC subject](#known-issue-oidc-subject-format) before running `Setup-GitHubOidc.ps1`.** This repo uses GitHub's immutable OIDC subject format, and the script registers the old format. Unless you add the credential described there, `azure/login` fails.
-
 ---
 
 ## Contents
@@ -94,7 +92,7 @@ Created by [`scripts/Setup-GitHubOidc.ps1`](../scripts/Setup-GitHubOidc.ps1) (ru
 | Location / RG | The deployment resource group, e.g. `rg-setemailcat-prod`. The script creates the RG if it doesn't exist, in `-Location`. **That region is where everything deploys**, because `main.bicep` defaults `location` to the RG's region. |
 | Federated credential issuer | `https://token.actions.githubusercontent.com` |
 | Federated credential audience | `api://AzureADTokenExchange` |
-| Federated credential subject | **`repo:akashic@648205/SetEmailCategory@1415034508:environment:<env>`** (see [Known issue](#known-issue-oidc-subject-format)) |
+| Federated credential subject | **`repo:akashic@648205/SetEmailCategory@1415034508:environment:<env>`** (see [OIDC subject format](#oidc-subject-format)) |
 | Role 1 | **Contributor**, scope = the resource group only |
 | Role 2 | **Role Based Access Control Administrator**, scope = the resource group, with an ABAC condition (below) |
 
@@ -111,37 +109,25 @@ and only to principals of type `ServicePrincipal`. **If you add a role assignmen
 
 The subject is environment-scoped, so **only a job that declares `environment: <env>` can use this identity**. A PR build, or a job without the environment, can't log in to Azure. That's what makes GitHub environment protection rules (section 4.2) effective.
 
-#### Known issue: OIDC subject format
+#### OIDC subject format
 
-This repository has GitHub's [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/) turned on:
+Entra only accepts the token if its `sub` claim matches the federated credential's subject exactly. This repository has GitHub's [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/) turned on, so the subject includes the owner and repo IDs as well as their names:
 
 ```bash
 $ gh api repos/akashic/SetEmailCategory/actions/oidc/customization/sub
 {"use_default":true,"use_immutable_subject":true,"sub_claim_prefix":"repo:akashic@648205/SetEmailCategory@1415034508"}
 ```
 
-So the deploy job's token carries `sub = repo:akashic@648205/SetEmailCategory@1415034508:environment:prod`. `Setup-GitHubOidc.ps1` builds the subject from the repo **name** (`repo:akashic/SetEmailCategory:environment:prod`), which will never match, and `azure/login` will fail with `AADSTS700213: No matching federated identity record found`.
+The deploy job's token therefore carries `sub = repo:akashic@648205/SetEmailCategory@1415034508:environment:prod`. The older name-based form (`repo:akashic/SetEmailCategory:environment:prod`) would never match and `azure/login` would fail with `AADSTS700213: No matching federated identity record found`.
 
-Until the script is updated, after running it, add a credential with the immutable subject and delete the name-based one, as [Microsoft recommends](https://learn.microsoft.com/entra/workload-id/workload-identities-github-immutable-subjects):
+`Setup-GitHubOidc.ps1` handles this for you:
 
-```bash
-ENV=prod
-RG=rg-setemailcat-$ENV
-ID=id-github-setemailcat-$ENV
-PREFIX=$(gh api repos/akashic/SetEmailCategory/actions/oidc/customization/sub --jq .sub_claim_prefix)
+- It reads `sub_claim_prefix` from that API with `gh`, so the subject matches whichever format the repo uses. If `gh` isn't available, pass the prefix with `-OidcSubjectPrefix`.
+- If `github-<env>` already exists with the name-based subject (created by an earlier version of the script), it updates it in place.
+- Once a credential with the immutable subject exists, it deletes any credential still holding the name-based subject. That follows [Microsoft's migration guidance](https://learn.microsoft.com/entra/workload-id/workload-identities-github-immutable-subjects): a name-based trust would also accept a future repo that reuses this name.
+- It stops with an error if `github-<env>` holds some other subject, or if the repo uses a custom OIDC subject template. Fix those by hand.
 
-az identity federated-credential create -g $RG --identity-name $ID --name github-$ENV-immutable \
-  --issuer https://token.actions.githubusercontent.com \
-  --subject "$PREFIX:environment:$ENV" \
-  --audiences api://AzureADTokenExchange
-
-# After a successful deployment, remove the mutable (name-based) trust:
-az identity federated-credential delete -g $RG --identity-name $ID --name github-$ENV --yes
-```
-
-Re-running `Setup-GitHubOidc.ps1` recreates `github-<env>` with the old subject, so delete it again afterwards. The permanent fix is to have the script read `sub_claim_prefix` from that API instead of building the subject from `-GitHubRepository`.
-
-Always use the IDs from the API, not ones typed by hand. If the repo is ever transferred or recreated, its IDs change and the credential must be recreated.
+If the repo is ever transferred or recreated, its IDs change: re-run the script to update the credential.
 
 #### Manual equivalent (no script)
 
@@ -154,7 +140,10 @@ PRINCIPAL=$(az identity show -g $RG -n $ID --query principalId -o tsv)
 CLIENT=$(az identity show -g $RG -n $ID --query clientId -o tsv)
 RG_ID=$(az group show -n $RG --query id -o tsv)
 
-# federated credential: see "Known issue" above for the subject
+PREFIX=$(gh api repos/akashic/SetEmailCategory/actions/oidc/customization/sub --jq .sub_claim_prefix)
+az identity federated-credential create -g $RG --identity-name $ID --name github-$ENV \
+  --issuer https://token.actions.githubusercontent.com --subject "$PREFIX:environment:$ENV" \
+  --audiences api://AzureADTokenExchange
 az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal \
   --role Contributor --scope $RG_ID
 # RBAC Administrator with the ABAC condition: copy $condition from Setup-GitHubOidc.ps1
@@ -340,7 +329,7 @@ Or use a repository ruleset (**Settings → Rules → Rulesets**) with the same 
 |---|---|---|
 | Actions enabled | Settings → Actions → General | Allow actions. The workflow uses `actions/checkout`, `actions/setup-dotnet`, `actions/upload-artifact`, `actions/download-artifact` and `azure/login`; if you restrict to selected actions, allow those. |
 | Default workflow permissions | Settings → Actions → General | **Read repository contents** (currently set). The workflow declares `contents: read` at the top and adds `id-token: write` only on the deploy job, which is what lets it request an OIDC token. Don't remove that line. |
-| OIDC subject claim | `gh api repos/<repo>/actions/oidc/customization/sub` | Leave as is (default template, immutable subject on). If you change the template or turn immutable subjects off, the federated credential subject must change to match. |
+| OIDC subject claim | `gh api repos/<repo>/actions/oidc/customization/sub` | Leave as is (default template, immutable subject on). If you change the template or the immutable setting, re-run `Setup-GitHubOidc.ps1` so the federated credential subject matches again. |
 | Fork PR workflows | Settings → Actions → General | Require approval for first-time contributors (default for public repos). Fork PRs only run the `build` job and can't reach Azure. |
 
 ### 4.5 Local tooling for whoever runs the setup
@@ -349,7 +338,7 @@ Or use a repository ruleset (**Settings → Rules → Rulesets**) with the same 
 |---|---|
 | Azure CLI (`az`) with Bicep | `az bicep install` |
 | PowerShell 7.2+ | All scripts. On Apple silicon use `brew install powershell` (formula), not the stale cask. Azure Cloud Shell works too. |
-| GitHub CLI (`gh`) | Needed for `-SetGitHubVariables` and the API calls above. To push changes under `.github/workflows/`, the token needs the `workflow` scope: `gh auth refresh -h github.com -s workflow`. |
+| GitHub CLI (`gh`) | Needed by `Setup-GitHubOidc.ps1` (to read the OIDC subject format and for `-SetGitHubVariables`) and for the API calls above. To push changes under `.github/workflows/`, the token needs the `workflow` scope: `gh auth refresh -h github.com -s workflow`. |
 | ExchangeOnlineManagement module | Installed by `Grant-MailboxAccess.ps1` if missing |
 | Power Platform CLI (`pac`) | For `pac connector create` |
 | .NET 10 SDK, Azure Functions Core Tools 4 | Local build/run only |
@@ -485,7 +474,7 @@ The order matters: some values only exist after an earlier step.
 | 1 | Pick region, register providers, confirm shared mailbox, create caller group F and service account G | Region, mailbox address, group object ID | Phase 0 |
 | 2 | `Setup-EntraApps.ps1 -Environment prod -CallerGroupObjectId <id>`; vault the client secret | Apps D and E, `entra-output.prod.json` | Phase 1 |
 | 3 | Fill `infra/env/prod.bicepparam`; commit via PR | Parameter file | Phase 2 |
-| 4 | `Setup-GitHubOidc.ps1 ... -SetGitHubVariables`; **add the immutable-subject federated credential** | Identity B, RG, 4 GitHub variables | Phase 3 |
+| 4 | `Setup-GitHubOidc.ps1 ... -SetGitHubVariables` | Identity B, RG, 4 GitHub variables | Phase 3 |
 | 5 | Set environment protection rules and branch protection (sections 4.2, 4.3) | | Phase 3 |
 | 6 | Run *build-and-deploy* (Actions → Run workflow) | Function app, identity C; summary shows app name, host name, principal ID | Phase 4 |
 | 7 | `Grant-MailboxAccess.ps1`; wait 30 min – 2 h | Exchange scope for C | Phase 5 |
@@ -502,7 +491,7 @@ The order matters: some values only exist after an earlier step.
 | Shared mailbox | A **separate test mailbox**. Never point non-production at production. |
 | Apps D, E | `Setup-EntraApps.ps1 -Environment dev` (creates *SetEmailCategory API (dev)* / *Connector (dev)*) |
 | Parameter file | Copy `prod.bicepparam` to `infra/env/dev.bicepparam`, set `environmentName = 'dev'` and the dev values |
-| Resource group + identity B | `Setup-GitHubOidc.ps1 -ResourceGroup rg-setemailcat-dev -GitHubEnvironment dev -SetGitHubVariables`, plus the immutable-subject credential with `:environment:dev` |
+| Resource group + identity B | `Setup-GitHubOidc.ps1 -ResourceGroup rg-setemailcat-dev -GitHubEnvironment dev -SetGitHubVariables` |
 | GitHub environment | `dev`, with its own four variables. Protection rules optional; you may allow feature branches. |
 | Workflow | Add `dev` to `workflow_dispatch.inputs.environment.options` |
 | Exchange | `Grant-MailboxAccess.ps1` against the dev function app and test mailbox |
@@ -563,7 +552,7 @@ A snapshot, so you know what's left. Re-check with section 8.
 | `prod` variables | **None set** | Section 4.1. The only deploy run so far ([run 38204564920](https://github.com/akashic/SetEmailCategory/actions/runs/38204564920), 2026-10-12) failed at `azure/login` with "Not all values are present. Ensure 'client-id' and 'tenant-id' are supplied." |
 | `prod` protection rules | **None**; any branch can deploy | Section 4.2 |
 | Branch protection on `main` | **None** | Section 4.3 |
-| OIDC subject | Immutable format on (`repo:akashic@648205/SetEmailCategory@1415034508`) | Add the matching federated credential ([Known issue](#known-issue-oidc-subject-format)) |
+| OIDC subject | Immutable format on (`repo:akashic@648205/SetEmailCategory@1415034508`) | Nothing extra: `Setup-GitHubOidc.ps1` registers the matching subject ([OIDC subject format](#oidc-subject-format)) |
 | `infra/env/prod.bicepparam` | **Placeholders** for mailbox, app IDs, tags, alert email | Section 5.1 |
 | Default workflow permissions | Read | – |
 | Repository secrets | None needed | – |
