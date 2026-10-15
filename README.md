@@ -86,6 +86,7 @@ The call is idempotent, so retries are safe. Each invocation finishes within 90 
 | `connector/` | Power Platform custom connector definition (templated) |
 | `.github/workflows/deploy.yml` | CI (PRs) and CD (main → environment) |
 | `docs/RUNBOOK.md` | **Step-by-step deployment and operations guide** |
+| `docs/AZURE-DEPLOYMENT-SETUP.md` | Reference for every account, GitHub setting and config file a deployment needs |
 
 ## Local development
 
@@ -99,4 +100,4 @@ To call Graph locally, fill `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIE
 
 ## Deploying
 
-Follow [docs/RUNBOOK.md](docs/RUNBOOK.md).
+Follow [docs/RUNBOOK.md](docs/RUNBOOK.md). [docs/AZURE-DEPLOYMENT-SETUP.md](docs/AZURE-DEPLOYMENT-SETUP.md) explains each account, GitHub setting and config file it touches, and what's still to configure in this repo.

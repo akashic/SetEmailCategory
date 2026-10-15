@@ -14,6 +14,8 @@ This runbook takes a new environment from nothing to a working Power Automate fl
 | 7 | Build the flow | Flow author | 15 min |
 | 8 | End-to-end verification | Flow author | 10 min |
 
+For what each account, GitHub setting and config file does, and how to set it without the scripts, see [AZURE-DEPLOYMENT-SETUP.md](AZURE-DEPLOYMENT-SETUP.md). **Read its OIDC subject note before Phase 3.**
+
 All scripts are PowerShell 7 and run unchanged in **Azure Cloud Shell** (PowerShell mode), which already has `az`, `pwsh` and `Install-Module` access. Every script is safe to re-run.
 
 ---
