@@ -8,10 +8,13 @@ This guide lists everything that has to be configured before `.github/workflows/
 
 [RUNBOOK.md](RUNBOOK.md) is the step-by-step procedure (phases 0–8) and covers day-2 operations. This guide is the reference behind it: what each setting is, where its value comes from, how to set it with or without the scripts, and how to check it. The runbook phase is given for each item.
 
+**If the target Azure environment isn't known yet, start with the [target environment questionnaire](#before-you-start-target-environment-questionnaire).** The template, scripts and this guide assume a fairly standard landing zone; the questionnaire finds out whether yours is one, and what changes if it isn't.
+
 ---
 
 ## Contents
 
+0. [Before you start: target environment questionnaire](#before-you-start-target-environment-questionnaire)
 1. [How a deployment authenticates](#1-how-a-deployment-authenticates)
 2. [Accounts and identities](#2-accounts-and-identities)
 3. [Azure subscription prerequisites](#3-azure-subscription-prerequisites)
@@ -21,6 +24,64 @@ This guide lists everything that has to be configured before `.github/workflows/
 7. [Adding another environment](#7-adding-another-environment-dev-or-test)
 8. [Verification commands](#8-verification-commands)
 9. [Current state of this repo](#9-current-state-of-this-repo-2026-10-16)
+
+---
+
+## Before you start: target environment questionnaire
+
+Send these questions to the teams that own the target environment before starting [section 6](#6-setup-order-checklist). Each row says what the answer changes. "No change" means the template, scripts and this guide already handle it. Anything else is work to plan before the first deployment.
+
+### Blocker: ask this first
+
+| # | Question | If the answer is… |
+|---|---|---|
+| T1 | Are the **Azure subscription**, the **Exchange Online organisation that hosts the shared mailbox**, and the **Power Platform environment** all in the **same Entra ID tenant**? | **Yes:** no change. **No:** the design doesn't work as built. The function's managed identity can only get tokens in its own tenant, so Exchange can't grant it mailbox access. Easy Auth also only accepts tokens from the subscription's tenant, so users signing in from another tenant are rejected. Options are to deploy into a subscription in the Microsoft 365 tenant (simplest), or a redesign using a multi-tenant app registration that trusts the managed identity (code, Bicep and script changes). |
+
+### Azure platform team
+
+| # | Question | If the answer is… |
+|---|---|---|
+| A1 | Which cloud: **public Azure**, or a national cloud (US Government, China)? | **Public:** no change. **National:** changes needed in three places: `azure/login` in `deploy.yml` needs its `environment` input; the connector template's `loginUri` and redirect URL are hard-coded for the public cloud; and the Bicep must set `SharedMailbox__GraphBaseUrl` to that cloud's Graph URL (the code supports it; the template doesn't set it). |
+| A2 | Which **regions** are allowed, and is the **Flex Consumption** plan available in one of them? Is there regional memory quota for 40 × 512 MB instances? | **Yes:** no change; use that region. **No Flex in an allowed region:** the template is Flex-only, so the hosting plan, scale settings and deployment step would need rework. **Quota too low:** request an increase before deploying. |
+| A3 | Will we **create the resource group**, or does the platform team (e.g. subscription vending)? Is the subscription dedicated to this workload or shared? | **We create it:** no change. **They create it:** no change to the template; give the existing RG name to `Setup-GitHubOidc.ps1`, which reuses it. Everything deploys to the RG's region. |
+| A4 | May we create a **user-assigned managed identity with a GitHub federated credential**? Or does the platform team issue deployment identities (e.g. an app registration or service principal they own)? | **We may:** no change; run `Setup-GitHubOidc.ps1`. **They issue it:** skip the script. Ask them for a federated credential with the subject in [section 2.3](#oidc-subject-format), the roles in A5, and its client ID for `AZURE_CLIENT_ID` (section 4.1). |
+| A5 | Can the deployment identity hold **Contributor** plus **Role Based Access Control Administrator constrained by an ABAC condition** to the 4 data roles in section 2.3, on the resource group? | **Yes:** no change. **Only Contributor:** the deployment fails at the role-assignment step. Either the platform team grants the 4 roles instead, which needs a Bicep change to skip the assignments and, because the function's identity only exists after the first deployment, probably a switch to a user-assigned identity they can grant in advance; or they deploy the first release themselves. |
+| A6 | Which **Azure Policy** assignments with *Deny* or *DeployIfNotExists* effect apply to the subscription or its management groups? In particular: allowed locations, required tags, naming rules, "deny public network access" on storage or function apps, private endpoints required, customer-managed keys, diagnostic settings to a central workspace, denied resource types (e.g. user-assigned identities). Running `az policy assignment list --disable-scope-strict-match -o table` in the subscription lists them. | **Only tags or locations:** no change; set `tags` and pick an allowed region. **Storage must be private:** no change; `enablePrivateNetworking = true`. **Function app must not be public:** not supported (see A8). **Naming rules:** template change needed; names are generated (`func-<workload>-<env>-<suffix>`) and can only be influenced through `workload`. **Customer-managed keys or other requirements:** template change per policy. |
+| A7 | Is there a **central Log Analytics workspace** we must send logs to, or central **action groups** for alerts? | **No:** no change; the template creates its own workspace and, if `alertEmailAddresses` is set, its own action group. **Yes:** template change to accept an existing workspace or action group ID. |
+| A8 | **Networking:** Must storage be private? Must the function app have **no public inbound** access? Is there a **hub VNet** with central private DNS, and which **IP range** can a spoke use? Is outbound traffic **forced through a firewall**? | **Storage private:** `enablePrivateNetworking = true`. **Central DNS:** `createPrivateDnsZones = false`. **Hub peering:** set the three prefix parameters from your IPAM; peer after deployment. **Firewall egress:** allow `graph.microsoft.com` and the Application Insights ingestion and live endpoints in the app's connection string, and have the network team check the Azure Functions outbound dependencies. **Private inbound:** not supported. Power Platform's connectors and GitHub-hosted runners must reach the app, so this needs a private endpoint on the app, Power Platform VNet support and self-hosted runners. |
+| A9 | Is a small **always-on cost** acceptable to avoid cold starts of a few seconds? | **Yes:** `alwaysReadyInstances = 1`. **No:** leave `0`. |
+
+### Identity (Entra ID) team
+
+| # | Question | If the answer is… |
+|---|---|---|
+| I1 | Can someone with **Application Administrator** run `Setup-EntraApps.ps1`, or do app registrations go through a request process? | **Script allowed:** no change. **Request process:** give them the specification in [section 2.5](#25-d-and-e-entra-app-registrations), and write `entra-output.<env>.json` by hand from what they create. |
+| I2 | Are **client secrets** allowed on app registrations, and is their **maximum lifetime** capped by an app management policy? | **Allowed, no cap below 12 months:** no change. **Capped:** pass `-SecretValidityMonths` within the cap and plan rotations accordingly. **Secrets forbidden:** the connector's OAuth setup uses a client secret, so an exception is needed (or the connector authentication design has to be revisited). |
+| I3 | Can we create a **security group** for callers and set **Assignment required** on the API app? | **Yes:** no change. **No:** skip `-CallerGroupObjectId`; any user in the tenant can then create a connection, though only through the connector. |
+| I4 | Can we have a **dedicated, licensed service account** for the flow, and can it be **excluded from sign-in frequency and compliant-device Conditional Access policies** for the API app? | **Yes:** no change ([section 2.7](#27-g-power-automate-service-account)). **No exclusion:** the connection expires on the policy's schedule and must be re-authenticated each time; plan who does it. **No service account:** the flow runs as a person and breaks when they leave or reset their password. |
+
+### Exchange / Microsoft 365 team
+
+| # | Question | If the answer is… |
+|---|---|---|
+| E1 | What is the **shared mailbox's primary SMTP address**, and which other mailbox can be used as a **negative test** (must stay out of scope)? | Goes into `sharedMailboxAddress` and `Grant-MailboxAccess.ps1`. |
+| E2 | Can an **Exchange administrator** run `Grant-MailboxAccess.ps1` (it uses Exchange **RBAC for Applications**: a management scope plus a role assignment)? Is there any existing tenant-wide Graph `Mail.*` application permission on our identity? | **Yes / none:** no change. **Existing Graph permission:** the script refuses to continue until it's removed, because it would cover every mailbox. |
+| E3 | Is there a separate **test mailbox** for dev/test? | Required for any non-production environment ([section 7](#7-adding-another-environment-dev-or-test)). |
+
+### Power Platform team
+
+| # | Question | If the answer is… |
+|---|---|---|
+| P1 | Which **Power Platform environment** will hold the connector and flow, and who is **Environment Maker** there? | Needed for `pac connector create` (runbook Phase 6). |
+| P2 | Does the environment's **DLP policy** allow custom connectors in the same data group as Office 365 Outlook, and is there a **custom connector URL allow-list**? | **Yes / no list:** no change. **Allow-list:** add `https://<functionAppHostName>/*`. **Custom connectors blocked:** needs a DLP change by the Power Platform admin. |
+| P3 | Does the service account have a **Power Automate Premium** licence? Must the connector live in a **solution** for ALM? | Premium is required for custom connectors. For a solution, add `--solution-unique-name` to `pac connector create`. |
+
+### GitHub
+
+| # | Question | If the answer is… |
+|---|---|---|
+| G1 | Will the repo stay at **`akashic/SetEmailCategory`**, or move to an organisation? | **Stays:** no change. **Moves:** the OIDC subject changes (owner name and ID). Re-run `Setup-GitHubOidc.ps1` after the move and check the organisation's Actions policies (allowed actions, OIDC subject templates) against [section 4.4](#44-actions-and-oidc-settings). |
+| G2 | Who should **approve production deployments**? | Their GitHub usernames go into the `prod` environment's required reviewers ([section 4.2](#42-environment-protection-rules-recommended)). |
 
 ---
 
@@ -471,6 +532,7 @@ The order matters: some values only exist after an earlier step.
 
 | # | Step | Produces | Runbook |
 |---|---|---|---|
+| 0 | Get answers to the [target environment questionnaire](#before-you-start-target-environment-questionnaire); resolve anything that isn't "no change" | Confirmed design fit, region, mailbox, approvers | – |
 | 1 | Pick region, register providers, confirm shared mailbox, create caller group F and service account G | Region, mailbox address, group object ID | Phase 0 |
 | 2 | `Setup-EntraApps.ps1 -Environment prod -CallerGroupObjectId <id>`; vault the client secret | Apps D and E, `entra-output.prod.json` | Phase 1 |
 | 3 | Fill `infra/env/prod.bicepparam`; commit via PR | Parameter file | Phase 2 |
@@ -544,10 +606,14 @@ curl -s https://$(az functionapp show -g $RG -n $FUNC --query defaultHostName -o
 
 ## 9. Current state of this repo (2026-10-16)
 
-A snapshot, so you know what's left. Re-check with section 8.
+A snapshot of what can be checked from the repo and GitHub. Re-check with section 8.
+
+**Nothing on the Azure, Entra ID, Exchange or Power Platform side has been checked or set up**, because the target environment isn't known yet. Treat every step in [section 6](#6-setup-order-checklist) as outstanding, starting with step 0 (the questionnaire). Section 6, not this table, is the to-do list.
 
 | Item | State | To do |
 |---|---|---|
+| Target environment | **Unknown** | [Questionnaire](#before-you-start-target-environment-questionnaire) |
+| Azure resource group, deployment identity, Entra apps, Exchange scope, connector | **Not checked; assume none exist** | Section 6, steps 1–10 |
 | GitHub environment `prod` | Exists | – |
 | `prod` variables | **None set** | Section 4.1. The only deploy run so far ([run 38204564920](https://github.com/akashic/SetEmailCategory/actions/runs/38204564920), 2026-10-12) failed at `azure/login` with "Not all values are present. Ensure 'client-id' and 'tenant-id' are supplied." |
 | `prod` protection rules | **None**; any branch can deploy | Section 4.2 |
