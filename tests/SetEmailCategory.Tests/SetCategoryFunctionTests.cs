@@ -1,6 +1,7 @@
 using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using SetEmailCategory.Functions;
@@ -39,12 +40,30 @@ public class SetCategoryFunctionTests
         bool requireAuth = true,
         PlatformInfo? platform = null,
         bool requireEasyAuthEnabled = true,
-        int deadlineSeconds = 90) => new(
+        int deadlineSeconds = 90,
+        ILogger<SetCategoryFunction>? logger = null) => new(
         service,
         Options.Create(new SecurityOptions { RequireAuthenticatedCaller = requireAuth, RequireEasyAuthEnabled = requireEasyAuthEnabled }),
         Options.Create(new ProcessingOptions { DeadlineSeconds = deadlineSeconds }),
         platform ?? new PlatformInfo(RunningInAzure: true, EasyAuthEnabled: true),
-        NullLogger<SetCategoryFunction>.Instance);
+        logger ?? NullLogger<SetCategoryFunction>.Instance);
+
+    private sealed class ScopeCapturingLogger : ILogger<SetCategoryFunction>
+    {
+        public List<object> Scopes { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull
+        {
+            Scopes.Add(state);
+            return null;
+        }
+
+        public bool IsEnabled(LogLevel logLevel) => false;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+        }
+    }
 
     private const string ValidBody = """{"messageId":"m","categories":["A"]}""";
 
@@ -230,5 +249,32 @@ public class SetCategoryFunctionTests
         var result = await CreateFunction(new StubService(Ok)).Run(CreateRequest(""), default);
 
         Assert.Equal(StatusCodes.Status400BadRequest, Assert.IsType<ObjectResult>(result).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("abc-123", "abc-123")]
+    [InlineData("run-1\r\nINFO forged entry", "run-1INFO forged entry")]
+    [InlineData("tab\tnull\0bell\a", "tabnullbell")]
+    [InlineData("line\u2028para\u2029end", "lineparaend")]
+    [InlineData("José Müller", "José Müller")]
+    public void Strips_characters_that_could_forge_log_entries(string value, string expected)
+        => Assert.Equal(expected, SetCategoryFunction.SanitizeForLog(value));
+
+    [Fact]
+    public void Caps_logged_header_length()
+        => Assert.Equal(SetCategoryFunction.MaxLoggedHeaderLength, SetCategoryFunction.SanitizeForLog(new string('x', 10_000)).Length);
+
+    [Fact]
+    public async Task Log_scope_holds_sanitised_header_values()
+    {
+        var logger = new ScopeCapturingLogger();
+        var request = CreateRequest(ValidBody, principalId: "oid\r\nforged");
+        request.Headers[SetCategoryFunction.CorrelationHeader] = "run-1\nINFO forged entry";
+
+        await CreateFunction(new StubService(Ok), logger: logger).Run(request, default);
+
+        var scope = Assert.IsType<Dictionary<string, object?>>(Assert.Single(logger.Scopes));
+        Assert.Equal("oidforged", scope["CallerId"]);
+        Assert.Equal("run-1INFO forged entry", scope["CorrelationId"]);
     }
 }

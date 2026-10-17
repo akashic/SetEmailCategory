@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
@@ -29,6 +30,9 @@ public sealed partial class SetCategoryFunction(
     // for JSON escaping while stopping an oversized body from being buffered and deserialised.
     internal const int MaxBodyBytes = 64 * 1024;
 
+    // Longer than any principal ID, UPN or sensible correlation ID; caps what a caller can add to every log entry.
+    internal const int MaxLoggedHeaderLength = 256;
+
     // Authentication is enforced by Easy Auth in front of the function, so the trigger is Anonymous
     // (a function key would be a second, shared secret for the custom connector to manage).
     [Function("SetCategory")]
@@ -40,11 +44,13 @@ public sealed partial class SetCategoryFunction(
         var callerName = req.Headers[PrincipalNameHeader].ToString();
         var correlationId = req.Headers[CorrelationHeader].ToString();
 
+        // Sanitised: the correlation ID is caller-supplied, and the principal headers can be forged while Easy Auth
+        // is off (the scope opens before the fail-closed check below, so that refusal is logged with it).
         using var scope = logger.BeginScope(new Dictionary<string, object?>
         {
-            ["CallerId"] = callerId,
-            ["CallerName"] = callerName,
-            ["CorrelationId"] = correlationId,
+            ["CallerId"] = SanitizeForLog(callerId),
+            ["CallerName"] = SanitizeForLog(callerName),
+            ["CorrelationId"] = SanitizeForLog(correlationId),
         });
 
         // Fail closed: if Easy Auth has been switched off, the principal header below could be forged.
@@ -145,6 +151,19 @@ public sealed partial class SetCategoryFunction(
 
         return total;
     }
+
+    /// <summary>
+    /// Removes control characters and line/paragraph separators, so a header value can't forge extra log entries,
+    /// and caps its length at <see cref="MaxLoggedHeaderLength"/>.
+    /// </summary>
+    internal static string SanitizeForLog(string value)
+    {
+        var capped = value.Length > MaxLoggedHeaderLength ? value[..MaxLoggedHeaderLength] : value;
+        return UnsafeLogCharacters().Replace(capped, string.Empty);
+    }
+
+    [GeneratedRegex(@"[\p{Cc}\p{Zl}\p{Zp}]")]
+    private static partial Regex UnsafeLogCharacters();
 
     private static ObjectResult Problem(int status, string title, string? detail, string? graphRequestId = null)
     {
