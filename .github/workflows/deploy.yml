@@ -84,7 +84,7 @@ jobs:
           file="infra/env/$ENVIRONMENT.bicepparam"
           [[ -f "$file" ]] || { echo "::error file=$file::Parameter file not found for environment '$ENVIRONMENT'"; exit 1; }
           if grep -n "'<" "$file"; then
-            echo "::error file=$file::Replace the '<...>' placeholders listed above before deploying (docs/AZURE-DEPLOYMENT-SETUP.md, section 5.1)."
+            echo "::error file=$file::Replace the '<...>' placeholders listed above before deploying (docs/AZURE-DEPLOYMENT-SETUP.md, section 6.1)."
             exit 1
           fi
 

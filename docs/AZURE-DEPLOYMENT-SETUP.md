@@ -1,645 +1,412 @@
-# Azure deployment setup: accounts, GitHub settings and config files
+# Azure deployment setup
 
-This guide lists everything that has to be configured before `.github/workflows/deploy.yml` can deploy SetEmailCategory to Azure, and before the deployed function can be used. That covers:
-
-- every account and identity involved (people, service principals, managed identities, the Power Automate service account),
-- every GitHub setting (environments, variables, protection rules, branch protection, Actions/OIDC settings),
-- every file in the repo that holds environment-specific configuration.
-
-[RUNBOOK.md](RUNBOOK.md) is the step-by-step procedure (phases 0–8) and covers day-2 operations. This guide is the reference behind it: what each setting is, where its value comes from, how to set it with or without the scripts, and how to check it. The runbook phase is given for each item.
-
-**If the target Azure environment isn't known yet, start with the [target environment questionnaire](#before-you-start-target-environment-questionnaire).** The template, scripts and this guide assume a fairly standard landing zone; the questionnaire finds out whether yours is one, and what changes if it isn't.
-
----
+Everything that must be configured before `.github/workflows/deploy.yml` can deploy SetEmailCategory and the function can be used: identities, GitHub settings and environment-specific files. [RUNBOOK.md](RUNBOOK.md) is the step-by-step procedure (phases 0–8); this guide is the reference behind it.
 
 ## Contents
 
-0. [Before you start: target environment questionnaire](#before-you-start-target-environment-questionnaire)
-1. [How a deployment authenticates](#1-how-a-deployment-authenticates)
-2. [Accounts and identities](#2-accounts-and-identities)
-3. [Azure subscription prerequisites](#3-azure-subscription-prerequisites)
-4. [GitHub configuration](#4-github-configuration)
-5. [Configuration files in the repo](#5-configuration-files-in-the-repo)
-6. [Setup order checklist](#6-setup-order-checklist)
-7. [Adding another environment](#7-adding-another-environment-dev-or-test)
-8. [Verification commands](#8-verification-commands)
-9. [Current state of this repo](#9-current-state-of-this-repo-2026-10-16)
+1. [Environment decisions](#1-environment-decisions)
+2. [How a deployment authenticates](#2-how-a-deployment-authenticates)
+3. [Identities and permissions](#3-identities-and-permissions)
+4. [Azure prerequisites](#4-azure-prerequisites)
+5. [GitHub configuration](#5-github-configuration)
+6. [Configuration files](#6-configuration-files)
+7. [Setup order](#7-setup-order)
+8. [Adding a dev or test environment](#8-adding-a-dev-or-test-environment)
+9. [Verification commands](#9-verification-commands)
+10. [Status (2026-10-18)](#10-status-2026-10-18)
 
 ---
 
-## Before you start: target environment questionnaire
+## 1. Environment decisions
 
-Send these questions to the teams that own the target environment before starting [section 6](#6-setup-order-checklist). Each row says what the answer changes. "No change" means the template, scripts and this guide already handle it. Anything else is work to plan before the first deployment.
+Answers from William Buck Australia's environment owners (2026-10-18). **Open** items block the first deployment; guidance for them follows the table.
 
-### Blocker: ask this first
+| # | Question | Answer | Action |
+|---|---|---|---|
+| T1 | Azure, Exchange Online and Power Platform in one Entra tenant? | Yes. GitHub Enterprise accounts sign in through a different tenant. | None. Azure trusts GitHub's OIDC token, not the tenant GitHub users sign in with. |
+| A1 | Cloud? | Commercial (worldwide) | None |
+| A2 | Region, Flex Consumption availability, quota? | Australia East | `location = 'australiaeast'` is set in `prod.bicepparam`. Ask for the RG in Australia East too. **Confirm** Flex availability (`az functionapp list-flexconsumption-locations -o table`) and quota for 40 × 512 MB. |
+| A3 | Who creates the resource group? | Platform team: `<resource-group-name>` | Pass it to `Setup-GitHubOidc.ps1 -ResourceGroup`; the script reuses it. Whoever runs the script needs Owner or User Access Administrator on the RG. |
+| A4 | May we create the GitHub deployment identity? | Yes, with `Setup-GitHubOidc.ps1` | Run with `-Location australiaeast` once G1 is answered. |
+| A5 | Contributor plus ABAC-constrained RBAC Administrator on the RG? | Yes | None |
+| A6 | Azure Policy constraints? | Tags/locations, private storage, naming rules | Set `tags`. Private storage: `enablePrivateNetworking = true` (set; depends on A8). **Open: naming rules.** Names are generated as `<type>-<workload>-<env>-<suffix>` with only `workload` configurable, so get `<naming-convention>` and change the `names` variable in `infra/main.bicep` before deploying. |
+| A7 | Central Log Analytics or action groups? | No, self-contained | None |
+| A8 | Hub peering and central DNS, IP range, firewall egress, private inbound? | **Open** | See [A8 guidance](#a8-networking). |
+| A9 | Always-on instance to avoid cold starts? | No, scale to zero | `alwaysReadyInstances = 0` (default) |
+| I1 | May an Application Administrator run `Setup-EntraApps.ps1`? | Yes | None |
+| I2 | Client secrets allowed, and for how long? | Yes, 12+ months | None; diarise rotation. |
+| I3 | Caller security group with *Assignment required*? | Yes: `<caller-group-name>` | Pass its object ID as `-CallerGroupObjectId`. Limit it to people who already have access to the shared mailbox. |
+| I4 | Dedicated service account, excluded from sign-in-frequency and compliant-device Conditional Access? | Yes: `<service-account-upn>` | None ([section 3.6](#36-g-power-automate-service-account)) |
+| E1 | Shared mailbox and negative-test mailbox? | `<shared-mailbox-address>`, `<negative-test-mailbox-address>` | `sharedMailboxAddress` and `Grant-MailboxAccess.ps1` |
+| E2 | Can an Exchange administrator run `Grant-MailboxAccess.ps1`? | **Open** | Also confirm the function's identity will have no Graph or Exchange Online application permissions (the script refuses otherwise). |
+| E3 | Test mailbox for dev/test? | Yes: `<test-mailbox-address>` | [Section 8](#8-adding-a-dev-or-test-environment) |
+| P1 | Power Platform environment and Environment Maker? | `<power-platform-environment>`, `<environment-maker>` | Runbook Phase 6 |
+| P2 | DLP allows custom connectors? URL allow-list? | Allowed, no allow-list | None |
+| P3 | Premium licence? Connector in a solution? | Premium; solution `<solution-unique-name>` | Add `--solution-unique-name <solution-unique-name>` to `pac connector create`. |
+| G1 | Does the organisation restrict Actions, or customise the OIDC subject or issuer? | **Open** | See [G1 guidance](#g1-github-organisation-policies). Answer before running `Setup-GitHubOidc.ps1`. |
+| G2 | Who approves production deployments? | `<prod-approvers>` | Required reviewers on `prod` ([section 5.2](#52-environment-protection-rules)) |
 
-| # | Question | If the answer is… |
-|---|---|---|
-| T1 | Are the **Azure subscription**, the **Exchange Online organisation that hosts the shared mailbox**, and the **Power Platform environment** all in the **same Entra ID tenant**? | **Yes:** no change. **No:** the design doesn't work as built. The function's managed identity can only get tokens in its own tenant, so Exchange can't grant it mailbox access. Easy Auth also only accepts tokens from the subscription's tenant, so users signing in from another tenant are rejected. Options are to deploy into a subscription in the Microsoft 365 tenant (simplest), or a redesign using a multi-tenant app registration that trusts the managed identity (code, Bicep and script changes). |
+Replace each `<placeholder>` here, in the parameter file and in script arguments as values are confirmed.
 
-A1 below can also be a blocker: if Microsoft 365 is in **GCC High or DoD**, the template can't be deployed as written.
+### A8: networking
 
-### Azure platform team
+Private storage (A6) puts storage behind private endpoints and the app's outbound traffic through a new VNet. Until A8 is answered, the template defaults apply: a standalone `10.60.0.0/24` VNet with its own `privatelink` DNS zones.
 
-| # | Question | If the answer is… |
-|---|---|---|
-| A1 | Which **cloud** are Azure and Microsoft 365 in: commercial (including Microsoft 365 **GCC**), **GCC High / DoD** (US Government), or **China** (21Vianet)? | **Commercial or GCC:** no change. GCC uses the worldwide Entra ID and Graph endpoints. **GCC High or DoD: blocker.** These tenants are in the US Government Entra cloud, and a managed identity can't get tokens across clouds, so T1 means an Azure Government subscription. Flex Consumption isn't available in Azure Government, so the template can't be deployed as written (hosting rework needed). Even once it is, these also change: `azure/login` needs `environment: AzureUSGovernment` and `audience: api://AzureADTokenExchangeUSGov`, and the federated credential's audience must match (`Setup-GitHubOidc.ps1` hard-codes the public one); the connector's `loginUri` becomes `https://login.microsoftonline.us`; the Bicep must set `SharedMailbox__GraphBaseUrl` (`https://graph.microsoft.us/v1.0/`, or `dod-graph.microsoft.us` for DoD); and support for Exchange RBAC for Applications there must be confirmed with Microsoft (not documented either way). The connector's templated redirect URL is the commercial one; whether it differs in government clouds isn't documented, so use the one the connector's Security tab shows. **China:** same kinds of changes (`AzureChinaCloud`, `api://AzureADTokenExchangeChina`, `microsoftgraph.chinacloudapi.cn`); check Flex availability with `az functionapp list-flexconsumption-locations` in that cloud. |
-| A2 | Which **regions** are allowed, and is the **Flex Consumption** plan available in one of them? Is there regional memory quota for 40 × 512 MB instances? | **Yes:** no change; use that region. **No Flex in an allowed region:** the template is Flex-only, so the hosting plan, scale settings and deployment step would need rework. **Quota too low:** request an increase before deploying. |
-| A3 | Will we **create the resource group**, or does the platform team (e.g. subscription vending)? Is the subscription dedicated to this workload or shared? | **We create it:** no change. **They create it:** no change to the template; give the existing RG name to `Setup-GitHubOidc.ps1`, which reuses it. Everything deploys to the RG's region. |
-| A4 | May we create a **user-assigned managed identity with a GitHub federated credential**? Or does the platform team issue deployment identities (e.g. an app registration or service principal they own)? | **We may:** no change; run `Setup-GitHubOidc.ps1`. **They issue it:** skip the script. Ask them for a federated credential with the subject in [section 2.3](#oidc-subject-format), the roles in A5, and its client ID for `AZURE_CLIENT_ID` (section 4.1). |
-| A5 | Can the deployment identity hold **Contributor** plus **Role Based Access Control Administrator constrained by an ABAC condition** to the 4 data roles in section 2.3, on the resource group? | **Yes:** no change. **Only Contributor:** the deployment fails at the role-assignment step. Either the platform team grants the 4 roles instead, which needs a Bicep change to skip the assignments and, because the function's identity only exists after the first deployment, probably a switch to a user-assigned identity they can grant in advance; or they deploy the first release themselves. |
-| A6 | Which **Azure Policy** assignments with *Deny* or *DeployIfNotExists* effect apply to the subscription or its management groups? In particular: allowed locations, required tags, naming rules, "deny public network access" on storage or function apps, private endpoints required, customer-managed keys, diagnostic settings to a central workspace, denied resource types (e.g. user-assigned identities). Running `az policy assignment list --disable-scope-strict-match -o table` in the subscription lists them. | **Only tags or locations:** no change; set `tags` and pick an allowed region. **Storage must be private:** no change; `enablePrivateNetworking = true`. **Function app must not be public:** not supported (see A8). **Naming rules:** template change needed; names are generated (`func-<workload>-<env>-<suffix>`) and can only be influenced through `workload`. **Customer-managed keys or other requirements:** template change per policy. |
-| A7 | Is there a **central Log Analytics workspace** we must send logs to, or central **action groups** for alerts? | **No:** no change; the template creates its own workspace and, if `alertEmailAddresses` is set, its own action group. **Yes:** template change to accept an existing workspace or action group ID. |
-| A8 | **Networking:** Must storage be private? Must the function app have **no public inbound** access? Is there a **hub VNet** with central private DNS, and which **IP range** can a spoke use? Will the spoke's outbound traffic be **routed through a firewall**? | **Storage private:** `enablePrivateNetworking = true`. **Central DNS:** `createPrivateDnsZones = false`. **Hub peering:** set the three prefix parameters from your IPAM; peer after deployment. **Firewall egress** (only applies with `enablePrivateNetworking = true`; without it the app has no VNet): on Flex Consumption, *all* outbound traffic goes through the VNet, so a route to a firewall catches every call. Microsoft publishes no fixed outbound-dependency list for Functions, so allow at least: `graph.microsoft.com`; the regional Application Insights endpoints in the app's connection string (`<region>.in.applicationinsights.azure.com`, `<region>.livediagnostics.monitor.azure.com`); the App Insights usage-data endpoints (`westeurope-5.in.applicationinsights.azure.com` or `westus-0.in.applicationinsights.azure.com`), or disable them with the app setting `APPLICATIONINSIGHTS_STATSBEAT_DISABLED=true`; and Entra ID (`login.microsoftonline.com`) and certificate-revocation endpoints, which App Service guidance lists as typical dependencies. Then test outbound connectivity before go-live. **Private inbound:** not supported by this template. Power Platform's connectors and GitHub-hosted runners must reach the app. It's feasible (Flex supports inbound private endpoints, and Power Platform VNet support covers custom connectors) but large: a private endpoint on the app; self-hosted GitHub runners inside the network; and Power Platform VNet support, which needs a **Managed Environment**, users with **Microsoft 365 E5/A5/G5-class licences** (or the listed compliance add-ons), and delegated subnets in **both Azure regions** paired with the Power Platform region. |
-| A9 | Is a small **always-on cost** acceptable to avoid cold starts of a few seconds? | **Yes:** `alwaysReadyInstances = 1`. **No:** leave `0`. |
+- **Hub with central private DNS:** `createPrivateDnsZones = false`; Azure Policy links the endpoints to the hub zones.
+- **Peering:** set `vnetAddressPrefix`, `appSubnetPrefix` and `privateEndpointSubnetPrefix` from IPAM, then peer after deployment.
+- **Firewall egress:** on Flex Consumption *all* outbound traffic uses the VNet. Allow at least `graph.microsoft.com`, `login.microsoftonline.com`, certificate-revocation endpoints, and the Application Insights endpoints in the connection string (`<region>.in.applicationinsights.azure.com`, `<region>.livediagnostics.monitor.azure.com`). Also allow the usage-data endpoints (`westeurope-5.in.applicationinsights.azure.com`, `westus-0.in.applicationinsights.azure.com`) or set `APPLICATIONINSIGHTS_STATSBEAT_DISABLED=true`. Test outbound connectivity before go-live.
+- **Private inbound:** not supported by this template. It needs a private endpoint on the app, self-hosted GitHub runners, and Power Platform VNet support (Managed Environment, E5/A5/G5-class licences, delegated subnets in both paired regions).
 
-### Identity (Entra ID) team
+### G1: GitHub organisation policies
 
-| # | Question | If the answer is… |
-|---|---|---|
-| I1 | Can someone with **Application Administrator** run `Setup-EntraApps.ps1`, or do app registrations go through a request process? | **Script allowed:** no change. **Request process:** give them the specification in [section 2.5](#25-d-and-e-entra-app-registrations), and write `entra-output.<env>.json` by hand from what they create. |
-| I2 | Are **client secrets** allowed on app registrations, and is their **maximum lifetime** capped by an app management policy? | **Allowed, no cap below 12 months:** no change. **Capped:** pass `-SecretValidityMonths` within the cap and plan rotations accordingly. **Secrets forbidden:** the connector's OAuth setup uses a client secret, so an exception is needed (or the connector authentication design has to be revisited). |
-| I3 | Can we create a **security group** for callers and set **Assignment required** on the API app? | **Yes:** no change. **No:** pass `-AllowAnyTenantUser` instead of `-CallerGroupObjectId`. Any user the connector is shared with can then change categories on any message in the shared mailbox, even without access to the mailbox, so get the mailbox owner's sign-off first. |
-| I4 | Can we have a **dedicated, licensed service account** for the flow, and can it be **excluded from sign-in frequency and compliant-device Conditional Access policies** for the API app? | **Yes:** no change ([section 2.7](#27-g-power-automate-service-account)). **No exclusion:** the connection expires on the policy's schedule and must be re-authenticated each time; plan who does it. **No service account:** the flow runs as a person and breaks when they leave or reset their password. |
-
-### Exchange / Microsoft 365 team
-
-| # | Question | If the answer is… |
-|---|---|---|
-| E1 | What is the **shared mailbox's primary SMTP address**, and which other mailbox can be used as a **negative test** (must stay out of scope)? | Goes into `sharedMailboxAddress` and `Grant-MailboxAccess.ps1`. |
-| E2 | Can an **Exchange administrator** run `Grant-MailboxAccess.ps1` (it uses Exchange **RBAC for Applications**: a management scope plus a role assignment)? Is there any existing tenant-wide Graph `Mail.*` application permission on our identity? | **Yes / none:** no change. **Existing Graph permission:** the script refuses to continue until it's removed, because it would cover every mailbox. |
-| E3 | Is there a separate **test mailbox** for dev/test? | Required for any non-production environment ([section 7](#7-adding-another-environment-dev-or-test)). |
-
-### Power Platform team
-
-| # | Question | If the answer is… |
-|---|---|---|
-| P1 | Which **Power Platform environment** will hold the connector and flow, and who is **Environment Maker** there? | Needed for `pac connector create` (runbook Phase 6). |
-| P2 | Does the environment's **DLP policy** allow custom connectors in the same data group as Office 365 Outlook, and is there a **custom connector URL allow-list**? | **Yes / no list:** no change. **Allow-list:** add `https://<functionAppHostName>/*`. **Custom connectors blocked:** needs a DLP change by the Power Platform admin. |
-| P3 | Does the service account have a **Power Automate Premium** licence? Must the connector live in a **solution** for ALM? | Premium is required for custom connectors. For a solution, add `--solution-unique-name` to `pac connector create`. |
-
-### GitHub
-
-| # | Question | If the answer is… |
-|---|---|---|
-| G1 | Does the **WilliamBuckAustralia** organisation (or its enterprise) restrict Actions (allowed actions, default workflow permissions) or set a **custom OIDC subject template**? | **No:** no change. **Restricts actions:** allow the ones listed in [section 4.4](#44-actions-and-oidc-settings). **Custom subject template:** `Setup-GitHubOidc.ps1` stops; create the federated credential by hand to match the `sub` claim the template produces. |
-| G2 | Who should **approve production deployments**? | Their GitHub usernames go into the `prod` environment's required reviewers ([section 4.2](#42-environment-protection-rules-recommended)). |
+- **Allowed-actions list:** allow `actions/checkout`, `actions/setup-dotnet`, `actions/upload-artifact`, `actions/download-artifact` and `azure/login`.
+- **Custom OIDC subject template or enterprise-specific issuer:** `Setup-GitHubOidc.ps1` stops; create the federated credential by hand to match the token's `sub` and issuer.
 
 ### Sources
 
-A1 and A8 were checked against Microsoft Learn on 2026-10-16. Cloud availability and networking requirements change, so re-check these before relying on them:
-
-- [Use the Azure Login action with OpenID Connect](https://learn.microsoft.com/azure/developer/github/connect-from-azure-openid-connect) (`environment` and `audience` inputs)
-- [Configure an application to trust a managed identity](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity) (cloud-specific token-exchange audiences; no cross-cloud token requests)
-- [Microsoft Graph national cloud deployments](https://learn.microsoft.com/graph/deployments) (Graph and Entra ID endpoints per cloud; GCC uses the worldwide ones)
-- [Migrate Consumption plan apps to the Flex Consumption plan](https://learn.microsoft.com/azure/azure-functions/migration/migrate-plan-consumption-to-flex) (Flex Consumption not yet in Azure Government)
-- [Collect audit logs using a custom connector](https://learn.microsoft.com/power-platform/guidance/coe/setup-auditlog) (custom connector login URL for GCC High/DoD)
-- [Role Based Access Control for Applications in Exchange Online](https://learn.microsoft.com/exchange/permissions-exo/application-rbac)
-- [Azure Functions networking options (Flex Consumption)](https://learn.microsoft.com/azure/azure-functions/functions-networking-options?pivots=flex-consumption-plan) (all outbound traffic via the VNet; inbound private endpoints)
-- [Azure Monitor endpoint access and firewall configuration](https://learn.microsoft.com/azure/azure-monitor/fundamentals/azure-monitor-network-access) and [Application Insights FAQ](https://learn.microsoft.com/azure/azure-monitor/app/application-insights-faq) (ingestion, live metrics and usage-data endpoints)
-- [App Service Environment networking](https://learn.microsoft.com/azure/app-service/environment/networking) (application dependencies behind an egress firewall)
-- [Power Platform VNet support overview](https://learn.microsoft.com/power-platform/admin/vnet-support-overview), [set-up guide](https://learn.microsoft.com/power-platform/admin/vnet-support-setup-configure) and [licensing FAQ](https://learn.microsoft.com/power-platform/admin/powerapps-flow-licensing-faq) (custom connectors supported; Managed Environment, licences, two regions)
+Checked on Microsoft Learn, 2026-10-16. Re-check before relying on them: [Flex Consumption networking](https://learn.microsoft.com/azure/azure-functions/functions-networking-options?pivots=flex-consumption-plan), [Azure Monitor network access](https://learn.microsoft.com/azure/azure-monitor/fundamentals/azure-monitor-network-access), [Application Insights FAQ](https://learn.microsoft.com/azure/azure-monitor/app/application-insights-faq), [App Service Environment networking](https://learn.microsoft.com/azure/app-service/environment/networking), [Power Platform VNet support](https://learn.microsoft.com/power-platform/admin/vnet-support-overview), [Exchange RBAC for Applications](https://learn.microsoft.com/exchange/permissions-exo/application-rbac), [Azure Login with OIDC](https://learn.microsoft.com/azure/developer/github/connect-from-azure-openid-connect).
 
 ---
 
-## 1. How a deployment authenticates
+## 2. How a deployment authenticates
 
 ```
 GitHub Actions (deploy job, environment: prod)
-   │  1. requests an OIDC token (permissions: id-token: write)
-   │     sub = repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>:environment:prod
+   │  OIDC token: sub = repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>:environment:prod
    ▼
-Microsoft Entra ID
-   │  2. matches the token to a federated credential on the
-   │     user-assigned managed identity id-github-setemailcat-prod
+Microsoft Entra ID → federated credential on managed identity id-github-setemailcat-prod
    ▼
-azure/login@v3 (client-id / tenant-id / subscription-id from GitHub environment variables)
-   │  3. az deployment group create  →  infra/main.bicep + infra/env/prod.bicepparam
-   │        Contributor on the RG creates the resources
-   │        RBAC Administrator (ABAC-constrained) assigns the function's 3 roles
-   │  4. az functionapp deployment source config-zip  →  app.zip
+azure/login (client, tenant and subscription IDs from GitHub environment variables)
+   │  az deployment group create: Contributor creates resources; constrained RBAC Administrator assigns 3 roles
+   │  az functionapp deployment source config-zip: app.zip
    ▼
-Function App (system-assigned managed identity)
-   │  storage, App Insights: Azure RBAC roles assigned by Bicep
-   │  Microsoft Graph: Exchange RBAC for Applications on ONE mailbox (Grant-MailboxAccess.ps1)
-   ▼
-Shared mailbox
+Function app (system-assigned identity) → storage and App Insights via Azure RBAC,
+                                          shared mailbox via Exchange RBAC for Applications
 ```
 
-**There are no secrets in GitHub.** The workflow needs four non-secret *variables* on the GitHub environment. Do not create an `AZURE_CREDENTIALS` secret or a service-principal client secret for deployment.
+**No secrets in GitHub.** Don't create an `AZURE_CREDENTIALS` secret or a deployment client secret.
 
 ---
 
-## 2. Accounts and identities
+## 3. Identities and permissions
 
-### 2.1 Summary
+| # | Identity | Created by | Purpose | Secret |
+|---|---|---|---|---|
+| A | Admins | Existing | Run the one-time setup | – |
+| B | `id-github-setemailcat-<env>` (user-assigned managed identity) | `Setup-GitHubOidc.ps1` | GitHub Actions deploys | No (OIDC) |
+| C | Function app system-assigned identity | Bicep | Storage, App Insights, Graph | No |
+| D | *SetEmailCategory API (<env>)* app registration | `Setup-EntraApps.ps1` | Audience Easy Auth validates | No |
+| E | *SetEmailCategory Connector (<env>)* app registration | `Setup-EntraApps.ps1` | Custom connector's OAuth client | **One client secret, held only in Power Platform** |
+| F | Caller security group | Admin | Who can get a token for D | – |
+| G | Power Automate service account | Admin | Owns the flow and connection | Vaulted password |
+| H | Dev app registration (optional) | Developer | Local Graph calls to a **test** mailbox | In `local.settings.json` only |
 
-| # | Identity | Kind | Created by | Used for | Secret? |
-|---|---|---|---|---|---|
-| A | Admin people (several roles) | Entra users | Already exist | Running the one-time setup scripts | – |
-| B | `id-github-setemailcat-<env>` | User-assigned managed identity + federated credential | `scripts/Setup-GitHubOidc.ps1` | GitHub Actions deploying to Azure | No (OIDC) |
-| C | `func-setemailcat-<env>-<suffix>` | System-assigned managed identity | Bicep (`infra/modules/functionApp.bicep`) | Function → Storage, App Insights, Graph | No |
-| D | *SetEmailCategory API (<env>)* | Entra app registration + enterprise app | `scripts/Setup-EntraApps.ps1` | The audience Easy Auth validates tokens for | No |
-| E | *SetEmailCategory Connector (<env>)* | Entra app registration + enterprise app | `scripts/Setup-EntraApps.ps1` | OAuth client of the Power Platform custom connector | **Yes**: one client secret, held only in Power Platform |
-| F | Caller group, e.g. `SG-SetEmailCategory-Users` | Entra security group | Admin (manual) | Who may obtain a token for the API | – |
-| G | Power Automate service account | Entra user (licensed) | Admin (manual) | Owns the flow and the connector connection | Password managed by identity team |
-| H | Dev app registration (optional) | Entra app registration | Developer (manual) | Local `func start` calling Graph against a **test** mailbox | Yes, in `local.settings.json` only |
+### 3.1 A: Admin roles
 
-### 2.2 A: Admin roles needed to run the setup
+| Task | Minimum role |
+|---|---|
+| `Setup-GitHubOidc.ps1` (identity B and its role assignments) | Owner, or User Access Administrator plus Contributor, on the RG |
+| `-SetGitHubVariables`, environment and branch protection | GitHub repo **Admin** |
+| `Setup-EntraApps.ps1` (D, E, consent, group assignment) | Entra **Application Administrator** or **Cloud Application Administrator** |
+| Create F and G | **Groups Administrator** / **User Administrator** |
+| `Grant-MailboxAccess.ps1` | Exchange **Organization Management** (or Entra **Exchange Administrator**), plus read access to the function app |
+| `pac connector create` | Power Platform **Environment Maker** |
+| DLP policy | **Power Platform Administrator** |
 
-No single person needs all of these. Hand each phase to the right admin.
-
-| Task | Script / place | Minimum role |
-|---|---|---|
-| Register resource providers, create RG, deployment identity and its role assignments | `Setup-GitHubOidc.ps1` | **Owner** on the subscription (or **Contributor** + **User Access Administrator**/**RBAC Administrator** on the subscription or RG) |
-| Write GitHub environment and variables (`-SetGitHubVariables`) | `gh` CLI | **Admin** on the GitHub repo |
-| Create app registrations D and E, admin consent, group assignment | `Setup-EntraApps.ps1` | Entra **Application Administrator** or **Cloud Application Administrator**. Granting the `AllPrincipals` consent to your own API is within that role. |
-| Create caller group F, service account G | Entra admin centre | **Groups Administrator** / **User Administrator** |
-| Exchange scoping of identity C | `Grant-MailboxAccess.ps1` | Exchange **Organization Management** (or Entra **Exchange Administrator**), plus Azure CLI read access to the function app |
-| Create custom connector | `pac connector create` / maker portal | Power Platform **Environment Maker** in the target environment |
-| DLP policy | Power Platform admin centre | **Power Platform Administrator** |
-
-### 2.3 B: GitHub deployment identity
-
-Created by [`scripts/Setup-GitHubOidc.ps1`](../scripts/Setup-GitHubOidc.ps1) (runbook Phase 3).
+### 3.2 B: GitHub deployment identity
 
 | Property | Value |
 |---|---|
-| Resource | `Microsoft.ManagedIdentity/userAssignedIdentities` |
-| Name | `id-github-setemailcat-<env>` (override with `-IdentityName`) |
-| Location / RG | The deployment resource group, e.g. `rg-setemailcat-prod`. The script creates the RG if it doesn't exist, in `-Location`. **That region is where everything deploys**, because `main.bicep` defaults `location` to the RG's region. |
-| Federated credential issuer | `https://token.actions.githubusercontent.com` |
-| Federated credential audience | `api://AzureADTokenExchange` |
-| Federated credential subject | **`repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>:environment:<env>`** (see [OIDC subject format](#oidc-subject-format); the script fills in the IDs) |
-| Role 1 | **Contributor**, scope = the resource group only |
-| Role 2 | **Role Based Access Control Administrator**, scope = the resource group, with an ABAC condition (below) |
+| Name, location | `id-github-setemailcat-<env>` in the deployment RG, `-Location` region |
+| Federated credential | Issuer `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange`, subject `<sub_claim_prefix>:environment:<env>` |
+| Roles on the RG | **Contributor**; **Role Based Access Control Administrator** with an ABAC condition allowing assignments only of Storage Blob Data Owner (`b7e6dc6d-f1e8-4753-8033-0f276bb0955b`), Storage Table Data Contributor (`0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3`) and Monitoring Metrics Publisher (`3913510d-42f4-4e42-8a64-420c390055eb`), to service principals only |
 
-**Why the RBAC Administrator role, and why it's constrained.** The Bicep template assigns three roles to the function's managed identity, which requires `Microsoft.Authorization/roleAssignments/write`. Contributor doesn't include that. Rather than grant Owner or User Access Administrator, the script grants RBAC Administrator with a condition that allows creating or deleting assignments only for:
+The subject is environment-scoped, so only a job declaring `environment: <env>` can sign in; that's what makes environment protection rules effective. If you add a role assignment to the Bicep, add its ID to `$AssignableRoles` in `Setup-GitHubOidc.ps1` and re-run the script.
 
-| Role | ID |
-|---|---|
-| Storage Blob Data Owner | `b7e6dc6d-f1e8-4753-8033-0f276bb0955b` |
-| Storage Table Data Contributor | `0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3` |
-| Monitoring Metrics Publisher | `3913510d-42f4-4e42-8a64-420c390055eb` |
-
-and only to principals of type `ServicePrincipal`. **If you add a role assignment to the Bicep, add its role ID to `$AssignableRoles` in `Setup-GitHubOidc.ps1` and re-run the script**, or the deployment fails with an authorization error at the role-assignment step.
-
-The subject is environment-scoped, so **only a job that declares `environment: <env>` can use this identity**. A PR build, or a job without the environment, can't log in to Azure. That's what makes GitHub environment protection rules (section 4.2) effective.
-
-#### OIDC subject format
-
-Entra only accepts the token if its `sub` claim matches the federated credential's subject exactly. Repositories created since July 2026, which includes this one after its migration to `WilliamBuckAustralia`, get GitHub's [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/) by default, so the subject includes the owner and repo IDs as well as their names. Check what the repo actually issues:
+**OIDC subject format.** Entra matches the `sub` claim exactly. Repos created since July 2026 use [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/), which include owner and repo IDs. Check the prefix:
 
 ```bash
-$ gh api repos/WilliamBuckAustralia/SetEmailCategory/actions/oidc/customization/sub
-{"use_default":true,"use_immutable_subject":true,"sub_claim_prefix":"repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>"}
+gh api repos/WilliamBuckAustralia/SetEmailCategory/actions/oidc/customization/sub --jq .sub_claim_prefix
+# repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>
 ```
 
-With that output, the deploy job's token carries `sub = repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>:environment:prod`. The older name-based form (`repo:WilliamBuckAustralia/SetEmailCategory:environment:prod`) would never match and `azure/login` would fail with `AADSTS700213: No matching federated identity record found`.
-
-`Setup-GitHubOidc.ps1` handles this for you:
-
-- It reads `sub_claim_prefix` from that API with `gh`, so the subject matches whichever format the repo uses. If `gh` isn't available, pass the prefix with `-OidcSubjectPrefix`.
-- If `github-<env>` already exists with the name-based subject (created by an earlier version of the script), it updates it in place.
-- Once a credential with the immutable subject exists, it deletes any credential still holding the name-based subject. That follows [Microsoft's migration guidance](https://learn.microsoft.com/entra/workload-id/workload-identities-github-immutable-subjects): a name-based trust would also accept a future repo that reuses this name.
-- It stops with an error if `github-<env>` holds some other subject, or if the repo uses a custom OIDC subject template. Fix those by hand.
-
-If the repo is ever transferred or recreated, its owner and repo IDs change, and so does the subject. The script won't overwrite a `github-<env>` credential that holds a different repo's subject: delete it (`az identity federated-credential delete -g <rg> --identity-name <identity> -n github-<env> --yes`), then re-run the script. This applies to any deployment identity created before the repo moved to `WilliamBuckAustralia`.
-
-#### Manual equivalent (no script)
+A mismatch fails `azure/login` with `AADSTS700213`. The script reads the prefix with `gh` (or takes `-OidcSubjectPrefix`), migrates a name-based `github-<env>` credential and then removes it, and stops if `github-<env>` holds another repo's subject or the repo uses a custom template. After a repo move, delete the old credential and re-run the script:
 
 ```bash
-SUB=<subscription-id>; ENV=prod; RG=rg-setemailcat-$ENV; LOC=<region>; ID=id-github-setemailcat-$ENV
-az account set -s $SUB
-az group create -n $RG -l $LOC
+az identity federated-credential delete -g <rg> --identity-name <identity> -n github-<env> --yes
+```
+
+Manual equivalent of the script:
+
+```bash
+ENV=prod; RG=<resource-group-name>; LOC=australiaeast; ID=id-github-setemailcat-$ENV
 az identity create -g $RG -n $ID -l $LOC
 PRINCIPAL=$(az identity show -g $RG -n $ID --query principalId -o tsv)
-CLIENT=$(az identity show -g $RG -n $ID --query clientId -o tsv)
 RG_ID=$(az group show -n $RG --query id -o tsv)
-
 PREFIX=$(gh api repos/WilliamBuckAustralia/SetEmailCategory/actions/oidc/customization/sub --jq .sub_claim_prefix)
 az identity federated-credential create -g $RG --identity-name $ID --name github-$ENV \
   --issuer https://token.actions.githubusercontent.com --subject "$PREFIX:environment:$ENV" \
   --audiences api://AzureADTokenExchange
 az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal \
   --role Contributor --scope $RG_ID
-# RBAC Administrator with the ABAC condition: copy $condition from Setup-GitHubOidc.ps1
 az role assignment create --assignee-object-id $PRINCIPAL --assignee-principal-type ServicePrincipal \
   --role "Role Based Access Control Administrator" --scope $RG_ID \
-  --condition "<condition from the script>" --condition-version 2.0
+  --condition "<condition from Setup-GitHubOidc.ps1>" --condition-version 2.0
 ```
 
-### 2.4 C: Function App managed identity
+### 3.3 C: Function app identity
 
-Created and configured by Bicep; nothing to do by hand except the Exchange step.
+| Grant | Set by |
+|---|---|
+| Storage Blob Data Owner and Storage Table Data Contributor on the storage account | Bicep |
+| Monitoring Metrics Publisher on Application Insights | Bicep |
+| `Application Mail.ReadWrite` on **one** mailbox via Exchange RBAC for Applications (scope `SetEmailCategory - <address>`, assignment `SetEmailCategory - <functionAppName> - Mail.ReadWrite`) | `Grant-MailboxAccess.ps1` |
 
-| Grant | Where | Set by |
+> **Never** grant this identity Graph `Mail.*` or Exchange Online `full_access_as_app` application permissions in Entra. They add to the Exchange scope and cover every mailbox ([lesson](lessons/2026-10-12-2038-exchange-rbac-for-apps-adds-to-entra-graph-grants.md)). `Grant-MailboxAccess.ps1` refuses to run if any exist.
+
+The identity's object ID is in the deploy run summary (`functionAppPrincipalId`). Redeploying a deleted function app creates a new identity, so re-run `Grant-MailboxAccess.ps1`.
+
+### 3.4 D and E: Entra app registrations
+
+`Setup-EntraApps.ps1` creates both and writes `entra-output.<env>.json` (git-ignored, identifiers only).
+
+| | D: API | E: Connector |
 |---|---|---|
-| Storage Blob Data Owner and Table Data Contributor on the storage account (no queue role: the app has HTTP triggers only) | Azure RBAC | `functionApp.bicep` (`storageRoleAssignments`) |
-| Monitoring Metrics Publisher on Application Insights | Azure RBAC | `functionApp.bicep` (`metricsPublisher`) |
-| Deployment package container read (Flex `functionAppConfig.deployment.storage`) | Uses the blob role above | `functionApp.bicep` |
-| `Application Mail.ReadWrite` on **one** shared mailbox | Exchange Online RBAC for Applications (management scope `SetEmailCategory - <address>`, role assignment `SetEmailCategory - <functionAppName> - Mail.ReadWrite`) | `scripts/Grant-MailboxAccess.ps1` (runbook Phase 5) |
-| **No** Microsoft Graph or Office 365 Exchange Online application permissions in Entra | – | `Grant-MailboxAccess.ps1` refuses to run if any exist |
+| Account types | Single tenant | Single tenant |
+| Identifier URI / redirect URIs | `api://<apiAppClientId>` | `https://global.consent.azure-apim.net/redirect` plus the connector's own URI (add with `-ConnectorRedirectUri` after creating the connector) |
+| Scope / permission | Exposes `user_impersonation`; v2.0 access tokens | Delegated `user_impersonation` on D, admin-consented (`AllPrincipals`) |
+| Assignment required | Yes, caller group F (unless `-AllowAnyTenantUser`) | – |
+| Secrets, Graph permissions | None | One client secret (12 months by default, printed once: vault it). Rotate with `-RotateSecret`. No Graph permissions. |
 
-The identity's object ID is printed in the deploy run summary and is a Bicep output (`functionAppPrincipalId`).
+`apiAppClientId` (D) and `allowedClientApplicationIds` (E) go into the parameter file. Easy Auth rejects tokens issued to any other client with 403.
 
-> **Never** add `Mail.ReadWrite` (or any `Mail.*`) as a Graph application permission, or `full_access_as_app` as an Office 365 Exchange Online one, to this identity in Entra. Exchange RBAC grants are *added* to Entra grants, so it would give the function access to every mailbox. See [the lesson](lessons/2026-10-12-2038-exchange-rbac-for-apps-adds-to-entra-graph-grants.md).
+### 3.5 F: Caller security group
 
-The identity is recreated if the function app is deleted and redeployed. Its new object ID needs `Grant-MailboxAccess.ps1` run again.
+A security group (not Microsoft 365) containing service account G and the flow authors; pass its object ID to `-CallerGroupObjectId`. Non-members get `AADSTS50105`. The function uses its own mailbox permission, so members can change and read categories on any message in the mailbox: this group is the real access boundary.
 
-### 2.5 D and E: Entra app registrations
+### 3.6 G: Power Automate service account
 
-Created by [`scripts/Setup-EntraApps.ps1`](../scripts/Setup-EntraApps.ps1) (runbook Phase 1, plus Phase 6 step 4 for the redirect URI). It writes `entra-output.<env>.json` (git-ignored; identifiers only).
-
-**D: SetEmailCategory API (<env>)**
-
-| Setting | Value | Why |
-|---|---|---|
-| Supported account types | Single tenant (`AzureADMyOrg`) | |
-| Application ID URI | `api://<apiAppClientId>` | Connector's resource URL; Easy Auth accepts it as audience |
-| Exposed scope | `user_impersonation` (type User), stable ID derived from workload/env | Connector requests it |
-| `api.requestedAccessTokenVersion` | `2` | Easy Auth's issuer is the v2.0 endpoint (`.../<tenant>/v2.0`) |
-| Enterprise app → *Assignment required* | Yes (unless `-AllowAnyTenantUser`) | Only group members can get a token |
-| Users and groups | Caller group F, default access role | |
-| API permissions / secrets | **None** | The API app never calls anything |
-
-**E: SetEmailCategory Connector (<env>)**
-
-| Setting | Value | Why |
-|---|---|---|
-| Supported account types | Single tenant | |
-| Web redirect URIs | `https://global.consent.azure-apim.net/redirect` **and** the connector's own URI (`.../redirect/<connector-specific-id>`) | The per-connector URI is only known after the connector exists; add it with `-ConnectorRedirectUri` |
-| API permissions | API app D → `user_impersonation` (delegated) | |
-| Admin consent | `oauth2PermissionGrant`, `consentType = AllPrincipals` | Users aren't prompted |
-| Client secret | One, 12-month validity by default (`-SecretValidityMonths`), display name `power-platform-connector-<yyyyMMdd>` | **Printed once.** Store it in your vault and record the expiry date. Rotate with `-RotateSecret` (runbook *Secret rotation*). |
-| Microsoft Graph permissions | **None** | |
-
-Two values from these registrations go into the Bicep parameter file (section 5.1): `apiAppClientId` (D) and `allowedClientApplicationIds` (E's client ID). Easy Auth rejects tokens issued to any other client with 403.
-
-### 2.6 F: Caller security group
-
-Required unless you deliberately pass `-AllowAnyTenantUser` (runbook Phase 0, step 4). Create a **security** group (not Microsoft 365), e.g. `SG-SetEmailCategory-Users`, containing the Power Automate service account (G) and any flow authors. Pass its object ID to `Setup-EntraApps.ps1 -CallerGroupObjectId`. Users outside it get `AADSTS50105` when creating a connection.
-
-The function changes the mailbox with its own permission, not the caller's, so this group is the real access boundary. Members can change categories on any message in the shared mailbox, and read a message's categories, so limit it to people who already have access to that mailbox.
-
-### 2.7 G: Power Automate service account
-
-The custom connector's connection holds a **delegated** sign-in, so the flow runs as whoever created the connection. Use a dedicated account (runbook Phase 6, step 6):
+The connection is a delegated sign-in, so the flow runs as whoever created it.
 
 | Requirement | Detail |
 |---|---|
-| Account type | Dedicated Entra user, e.g. `svc-setemailcat@contoso.com`. Not a person's account. |
-| Licence | Power Automate **Premium** (custom connectors are premium). Office 365 licence or delegated access to read the shared mailbox for the trigger. |
-| Group membership | Caller group F |
-| Shared mailbox | *Full Access* on the shared mailbox, so the *When a new email arrives in a shared mailbox (V2)* trigger can read it |
-| Conditional Access | Exclude from **sign-in frequency** and **compliant-device** policies for the *SetEmailCategory API* app, or the connection expires on that schedule. Keep MFA/location policies your identity team requires; the connection survives those as long as the refresh token stays valid. |
-| Password | Long, vaulted, non-expiring or rotated on a schedule with the connection re-authenticated straight afterwards. A password reset breaks the connection (every run returns 401). |
-| Ownership | Owner of the flow and the connection. Add a second human co-owner to the flow for break-glass. |
+| Account | Dedicated Entra user, not a person's account |
+| Licence and access | Power Automate **Premium**; *Full Access* on the shared mailbox for the trigger |
+| Group | Member of F |
+| Conditional Access | Excluded from sign-in-frequency and compliant-device policies for the API app, or the connection expires on that schedule |
+| Password | Long and vaulted. A reset breaks the connection (every run returns 401) until it's re-authenticated. |
+| Ownership | Owns the flow and connection; add a human co-owner to the flow |
 
-### 2.8 H: Dev app registration (local development only)
+### 3.7 H: Dev app registration
 
-Only needed to call Graph from `func start`. Create a separate app registration with a client secret, give it **no** Graph permissions in Entra, and scope it with Exchange RBAC to a **test** mailbox (the same `New-ManagementScope` / `New-ManagementRoleAssignment` commands `Grant-MailboxAccess.ps1` runs, with the dev app's `appId`). Its credentials go only in `src/SetEmailCategory/local.settings.json`, which is git-ignored. It is never used by the pipeline.
+For local `func start` only. A separate app registration with a client secret, **no** Graph permissions, scoped by Exchange RBAC to a **test** mailbox (the same commands `Grant-MailboxAccess.ps1` runs, with the dev app's `appId`). Credentials live only in the git-ignored `local.settings.json`.
 
 ---
 
-## 3. Azure subscription prerequisites
+## 4. Azure prerequisites
 
 Runbook Phase 0.
 
-| Item | Command / check |
+| Item | Check |
 |---|---|
-| Region supports Flex Consumption | `az functionapp list-flexconsumption-locations --query "[].name" -o tsv` |
-| Resource providers registered | `Microsoft.Web`, `Microsoft.Storage`, `Microsoft.Insights`, `Microsoft.OperationalInsights`, `Microsoft.ManagedIdentity`, and `Microsoft.Network` + `Microsoft.App` if `enablePrivateNetworking = true`. `az provider register --namespace <ns>` |
-| Azure Policy | The template already disables storage shared keys and public blob access, FTP and SCM basic auth, App Insights local auth, and enforces TLS 1.2 / HTTPS. If policy requires more (tags, diagnostic settings, private endpoints), set `tags` / `enablePrivateNetworking` in the parameter file. Policies that *deny* user-assigned identities or role assignments with conditions will block Phase 3. |
-| Quota | Flex Consumption regional memory quota must cover `maximumInstanceCount × instanceMemoryMB` (40 × 512 MB by default). |
+| Flex Consumption in the region | `az functionapp list-flexconsumption-locations --query "[].name" -o tsv` |
+| Resource providers | `Microsoft.Web`, `Microsoft.Storage`, `Microsoft.Insights`, `Microsoft.OperationalInsights`, `Microsoft.ManagedIdentity`, `Microsoft.Network`, `Microsoft.App` (the last two for private networking): `az provider register --namespace <ns>` |
+| Quota | Flex regional memory quota ≥ `maximumInstanceCount × instanceMemoryMB` (40 × 512 MB) |
+| Azure Policy | The template already disables storage shared keys and public blob access, FTP/SCM basic auth and App Insights local auth, and enforces HTTPS/TLS 1.2. Policies denying user-assigned identities or conditional role assignments block `Setup-GitHubOidc.ps1`. |
 
 ---
 
-## 4. GitHub configuration
+## 5. GitHub configuration
 
-Repo: [`WilliamBuckAustralia/SetEmailCategory`](https://github.com/WilliamBuckAustralia/SetEmailCategory) on github.com (GitHub Enterprise Cloud). Organisation or enterprise policies can override some repository settings below; where they do, the policy wins.
+Repo: [`WilliamBuckAustralia/SetEmailCategory`](https://github.com/WilliamBuckAustralia/SetEmailCategory) (GitHub Enterprise Cloud). Organisation or enterprise policy overrides repository settings where they conflict.
 
-### 4.1 Environment variables (required)
+### 5.1 Environment variables
 
-The deploy job reads these with `${{ vars.* }}`. Set them on the **environment**, not the repo, so each environment can point at a different subscription/RG.
+Set on the **environment** (not the repo) by `Setup-GitHubOidc.ps1 -SetGitHubVariables`, or by hand. They're identifiers, not secrets; no secrets are needed.
 
-| Variable | Value | Source |
-|---|---|---|
-| `AZURE_CLIENT_ID` | **Client ID** (not principal/object ID) of `id-github-setemailcat-<env>` | `az identity show -g <rg> -n <id> --query clientId -o tsv` |
-| `AZURE_TENANT_ID` | Entra tenant ID | `az account show --query tenantId -o tsv` |
-| `AZURE_SUBSCRIPTION_ID` | Subscription containing the RG | `az account show --query id -o tsv` |
-| `AZURE_RESOURCE_GROUP` | e.g. `rg-setemailcat-prod` | The `-ResourceGroup` you passed to `Setup-GitHubOidc.ps1` |
-
-These are identifiers, not secrets. They appear masked in logs only because `azure/login` masks the client ID.
-
-Set them with `Setup-GitHubOidc.ps1 -SetGitHubVariables`, or by hand:
+| Variable | Value |
+|---|---|
+| `AZURE_CLIENT_ID` | Client ID (not object ID) of identity B |
+| `AZURE_TENANT_ID` | Entra tenant ID |
+| `AZURE_SUBSCRIPTION_ID` | Subscription containing the RG |
+| `AZURE_RESOURCE_GROUP` | `<resource-group-name>` |
 
 ```bash
 for kv in AZURE_CLIENT_ID=<client-id> AZURE_TENANT_ID=<tenant-id> \
-          AZURE_SUBSCRIPTION_ID=<sub-id> AZURE_RESOURCE_GROUP=rg-setemailcat-prod; do
+          AZURE_SUBSCRIPTION_ID=<sub-id> AZURE_RESOURCE_GROUP=<resource-group-name>; do
   gh variable set "${kv%%=*}" --env prod --repo WilliamBuckAustralia/SetEmailCategory --body "${kv#*=}"
 done
 ```
 
-UI: **Settings → Environments → prod → Environment variables → Add variable**.
+### 5.2 Environment protection rules
 
-**No secrets are required.** If any `AZURE_*` secrets exist from earlier experiments, delete them.
+The environment name must match the workflow's `environment:`, the `infra/env/<env>.bicepparam` file name and the federated credential subject. `-SetGitHubVariables` creates the environment without protection, so add:
 
-### 4.2 Environment protection rules (recommended)
-
-The environment name must match exactly: the workflow's `environment:` value, the `infra/env/<env>.bicepparam` filename, and the federated credential subject.
-
-| Setting | Recommended value | Why |
-|---|---|---|
-| **Required reviewers** | The ops lead plus one backup (users or a team) | A human approves each production deployment |
-| **Prevent self-review** | On | The person who pushed can't approve their own deployment |
-| **Deployment branches and tags** | *Selected branches and tags*: branch `main`, tag `v*` | Stops other branches deploying. Include `v*` tags, or the runbook's rollback procedure (*Run workflow* on an earlier release tag) is rejected. |
-| Wait timer | 0 | |
-| Environment secrets | None | |
-
-UI: **Settings → Environments → prod**. Or with the API:
+| Setting | Value |
+|---|---|
+| Required reviewers | `<prod-approvers>` |
+| Prevent self-review | On (turn off if there's only one reviewer, or nobody can deploy) |
+| Deployment branches and tags | Branch `main` and tag `v*` (the runbook's rollback deploys a release tag) |
 
 ```bash
 REPO=WilliamBuckAustralia/SetEmailCategory
 REVIEWER_ID=$(gh api users/<reviewer-login> --jq .id)
-
 gh api -X PUT repos/$REPO/environments/prod --input - <<EOF
-{
-  "prevent_self_review": true,
-  "reviewers": [{ "type": "User", "id": $REVIEWER_ID }],
-  "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true }
-}
+{ "prevent_self_review": true, "reviewers": [{ "type": "User", "id": $REVIEWER_ID }],
+  "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
 EOF
 gh api -X POST repos/$REPO/environments/prod/deployment-branch-policies -f name=main -f type=branch
 gh api -X POST repos/$REPO/environments/prod/deployment-branch-policies -f name='v*' -f type=tag
 ```
 
-Note that `Setup-GitHubOidc.ps1 -SetGitHubVariables` creates the environment with **no** protection rules; add them afterwards. A single-maintainer repo with self-review prevention on can't deploy, so turn that off if you're the only reviewer.
+### 5.3 Branch protection on `main`
 
-### 4.3 Branch protection on `main` (recommended)
-
-Every push to `main` that touches `src/`, `tests/`, `infra/` or the workflow deploys, so protect it:
-
-| Rule | Value |
-|---|---|
-| Require a pull request before merging | On, 1 approval |
-| Require status checks to pass | On; required check **`build`** (the job name in `deploy.yml`, which runs on every PR) |
-| Require branches to be up to date | On |
-| Block force pushes and deletion | On |
+Pushes to `main` that touch `src/`, `tests/`, `infra/` or the workflow deploy. Require a PR with one approval, the **`build`** status check (strict), and block force pushes and deletion:
 
 ```bash
 gh api -X PUT repos/WilliamBuckAustralia/SetEmailCategory/branches/main/protection --input - <<'EOF'
-{
-  "required_status_checks": { "strict": true, "contexts": ["build"] },
-  "enforce_admins": false,
+{ "required_status_checks": { "strict": true, "contexts": ["build"] }, "enforce_admins": false,
   "required_pull_request_reviews": { "required_approving_review_count": 1 },
-  "restrictions": null,
-  "allow_force_pushes": false,
-  "allow_deletions": false
-}
+  "restrictions": null, "allow_force_pushes": false, "allow_deletions": false }
 EOF
 ```
 
-Or use a repository ruleset (**Settings → Rules → Rulesets**) with the same rules.
+A repository ruleset with the same rules works too.
 
-### 4.4 Actions and OIDC settings
-
-| Setting | Where | Required value |
-|---|---|---|
-| Actions enabled | Settings → Actions → General | Allow actions. The workflow uses `actions/checkout`, `actions/setup-dotnet`, `actions/upload-artifact`, `actions/download-artifact` and `azure/login`; if you restrict to selected actions, allow those. |
-| Default workflow permissions | Settings → Actions → General | **Read repository contents** (the organisation or enterprise may already enforce this). The workflow declares `contents: read` at the top and adds `id-token: write` only on the deploy job, which is what lets it request an OIDC token. Don't remove that line. |
-| OIDC subject claim | `gh api repos/<repo>/actions/oidc/customization/sub` | Default template with the immutable subject on (expected for a repo created since July 2026; check with the command). If the template or the immutable setting changes, including through an organisation policy, re-run `Setup-GitHubOidc.ps1` so the federated credential subject matches again. |
-| Fork PR workflows | Settings → Actions → General | If the organisation allows forks of private or internal repos, require approval for fork pull request workflows. Fork PRs only run the `build` job and can't reach Azure. |
-
-### 4.5 Local tooling for whoever runs the setup
-
-| Tool | Notes |
-|---|---|
-| Azure CLI (`az`) with Bicep | `az bicep install` |
-| PowerShell 7.2+ | All scripts. On Apple silicon use `brew install powershell` (formula), not the stale cask. Azure Cloud Shell works too. |
-| GitHub CLI (`gh`) | Needed by `Setup-GitHubOidc.ps1` (to read the OIDC subject format and for `-SetGitHubVariables`) and for the API calls above. To push changes under `.github/workflows/`, the token needs the `workflow` scope: `gh auth refresh -h github.com -s workflow`. The signed-in account needs access to `WilliamBuckAustralia/SetEmailCategory`; if the organisation enforces SAML SSO, authorise the token for it (`gh auth login` does this in the browser). |
-| ExchangeOnlineManagement module | Installed by `Grant-MailboxAccess.ps1` if missing |
-| Power Platform CLI (`pac`) | For `pac connector create` |
-| .NET 10 SDK, Azure Functions Core Tools 4 | Local build/run only |
-
----
-
-## 5. Configuration files in the repo
-
-| File | Committed? | Per environment? | Edit when |
-|---|---|---|---|
-| `infra/env/<env>.bicepparam` | Yes | Yes | Setting up an environment; changing mailbox, apps, alerting, scale |
-| `infra/main.bicep` | Yes | No | Changing defaults or adding resources |
-| `infra/modules/functionApp.bicep` | Yes | No | App settings, Easy Auth, role assignments |
-| `.github/workflows/deploy.yml` | Yes | Environment list | Adding an environment |
-| `connector/apiDefinition.swagger.json`, `connector/apiProperties.json` | Yes (templates) | No | Changing the API surface or connector auth |
-| `connector/dist/<env>/` | **No** (git-ignored) | Yes | Generated by `Build-ConnectorDefinition.ps1` |
-| `entra-output.<env>.json` | **No** (git-ignored) | Yes | Generated by `Setup-EntraApps.ps1` |
-| `src/SetEmailCategory/local.settings.json` | **No** (git-ignored) | Local | Local development |
-| `global.json`, `src/SetEmailCategory/host.json` | Yes | No | SDK or host changes |
-
-### 5.1 `infra/env/<env>.bicepparam` (required, per environment)
-
-The deploy job passes `infra/env/$ENVIRONMENT.bicepparam`, so the file name must match the GitHub environment name. All values are identifiers, so commit the file. **Every `'<...>'` placeholder must be replaced before the first deployment.** The deploy job's *Check parameter file* step stops before what-if if any remain, because a placeholder can otherwise deploy an app that rejects or fails every call.
-
-| Parameter | Required | Value | Source |
-|---|---|---|---|
-| `environmentName` | Yes | `dev` / `test` / `prod` (only these are allowed) | Matches file name |
-| `sharedMailboxAddress` | Yes | Primary SMTP address of the shared mailbox | Exchange admin centre. Must be the same address used in `Grant-MailboxAccess.ps1`. |
-| `apiAppClientId` | Yes | Client ID of app D | `entra-output.<env>.json` → `apiAppClientId` |
-| `allowedClientApplicationIds` | Yes | `[ '<client ID of app E>' ]` | `entra-output.<env>.json` → `connectorClientId` |
-| `tags` | No (default `{}`) | Your mandatory tags. `workload` and `environment` are added automatically. | Your organisation's policy |
-| `alertEmailAddresses` | No (default `[]`) | Ops distribution list. Empty = no alert resources. | |
-| `enablePrivateNetworking` | No (default `false`) | `true` puts storage behind private endpoints | Runbook *Private networking* |
-| `alwaysReadyInstances` | No (default `0`) | `1` removes cold starts at a fixed cost | |
-
-Parameters with defaults in `main.bicep` that you can also set here:
-
-| Parameter | Default | Notes |
-|---|---|---|
-| `workload` | `setemailcat` | 3–12 lowercase letters/digits; part of every resource name |
-| `location` | RG location | Must support Flex Consumption |
-| `instanceMemoryMB` | `512` | 512 / 2048 / 4096 |
-| `maximumInstanceCount` | `40` | Minimum 40 (enforced). Lower values make Flex reject bursts. |
-| `httpPerInstanceConcurrency` | `50` | Keeps bursts on one instance |
-| `graphConcurrencyPerInstance` | `4` | Graph's per-mailbox limit |
-| `requestDeadlineSeconds` | `90` | Must stay under Power Automate's 120 s |
-| `vnetAddressPrefix` / `appSubnetPrefix` / `privateEndpointSubnetPrefix` | `10.60.0.0/24` / `.0/26` / `.64/27` | Only with private networking; pick from your IPAM if peering |
-| `createPrivateDnsZones` | `true` | `false` if a hub manages `privatelink.*` zones |
-| `logRetentionDays` | `90` | 30–730 |
-| `throttlingAlertThreshold` | `10` | 503s in 15 minutes before the throttling alert fires. Raise it if bursts trip it while flows still succeed. |
-
-Resource names are derived as `<type>-<workload>-<env>-<6-char suffix>`, with the suffix from `uniqueString(resourceGroup().id, workload, env)`. They stay stable as long as the RG, workload and environment don't change.
-
-Check the file compiles before committing:
-
-```bash
-az bicep build-params --file infra/env/prod.bicepparam --stdout > /dev/null
-az deployment group what-if -g rg-setemailcat-prod --parameters infra/env/prod.bicepparam
-```
-
-### 5.2 Function App settings (`infra/modules/functionApp.bicep`)
-
-Set by Bicep on every deployment. **Don't change them in the portal**: the next deployment overwrites them.
-
-| App setting | Value | From |
-|---|---|---|
-| `AzureWebJobsStorage__credential` | `managedidentity` | Fixed |
-| `AzureWebJobsStorage__blobServiceUri` / `__tableServiceUri` | Storage endpoints | Storage module |
-| `APPLICATIONINSIGHTS_CONNECTION_STRING` | App Insights connection string | Monitoring module |
-| `APPLICATIONINSIGHTS_AUTHENTICATION_STRING` | `Authorization=AAD` | Fixed (local auth is off) |
-| `SharedMailbox__Address` | `sharedMailboxAddress` | Parameter file |
-| `Security__RequireAuthenticatedCaller` | `true` | Fixed |
-| `Security__RequireEasyAuthEnabled` | `true` | Fixed. Only change per runbook troubleshooting *500 Service misconfigured*. |
-| `Processing__MaxConcurrentGraphRequests` | `graphConcurrencyPerInstance` | Parameter |
-| `Processing__DeadlineSeconds` | `requestDeadlineSeconds` | Parameter |
-
-App Service Authentication (`authsettingsV2`), also from this file:
+### 5.4 Actions settings
 
 | Setting | Value |
 |---|---|
-| Require authentication | Yes, `Return401`; `/api/health` excluded (used by the smoke test) |
-| Issuer | `https://login.microsoftonline.com/<tenant>/v2.0` |
-| Client ID | `apiAppClientId` |
-| Allowed audiences | `<apiAppClientId>`, `api://<apiAppClientId>` |
-| Allowed client applications | `allowedClientApplicationIds` |
-| Token store | Off |
+| Allowed actions | All, or at least those listed under [G1](#g1-github-organisation-policies) |
+| Default workflow permissions | Read. The deploy job adds `id-token: write` itself; don't remove it. |
+| OIDC subject | Default template, immutable subject on. If it changes, re-run `Setup-GitHubOidc.ps1`. |
+| Fork PR workflows | Require approval, if forks are allowed. Fork PRs only run `build` and can't reach Azure. |
 
-Platform settings: HTTPS only, TLS 1.2, FTPS disabled, FTP and SCM basic publishing credentials disabled (so deployments must use Entra ID, which is what the pipeline does).
+### 5.5 Tooling for whoever runs the setup
 
-### 5.3 `.github/workflows/deploy.yml`
-
-You normally don't edit this. What it expects:
-
-| Item | Detail |
-|---|---|
-| Triggers | PRs to `main` (build/test only); pushes to `main` touching `src/**`, `tests/**`, `infra/**` or the workflow (build + deploy to `prod`); manual `workflow_dispatch` with an `environment` choice |
-| Doc-only changes | Don't trigger a deployment (paths filter) |
-| Environment list | `workflow_dispatch.inputs.environment.options: [prod]`. Add new environment names here. Pushes always deploy to `prod`. |
-| Variables read | `vars.AZURE_CLIENT_ID`, `vars.AZURE_TENANT_ID`, `vars.AZURE_SUBSCRIPTION_ID`, `vars.AZURE_RESOURCE_GROUP` |
-| Permissions | Top-level `contents: read`; deploy job adds `id-token: write` |
-| Concurrency | One deployment per environment at a time, never cancelled mid-run |
-| Bicep outputs consumed | `functionAppName`, `functionAppHostName`, `functionAppPrincipalId`. Keep these output names in `main.bicep`. |
-| Smoke test | `/api/health` must report the new commit SHA, `runningInAzure: true` and `acceptingRequests: true`; an unauthenticated POST must return 401 |
-
-### 5.4 Connector templates (`connector/`)
-
-`apiDefinition.swagger.json` and `apiProperties.json` are templates. `scripts/Build-ConnectorDefinition.ps1` replaces these tokens and writes `connector/dist/<env>/` (runbook Phase 6):
-
-| Token | Replaced with |
-|---|---|
-| `{{FUNCTION_HOST}}` | `-FunctionHostName` (from the deploy run summary, e.g. `func-setemailcat-prod-abc123.azurewebsites.net`) |
-| `{{CONNECTOR_CLIENT_ID}}` | `entra-output.<env>.json` → `connectorClientId` |
-| `{{API_IDENTIFIER_URI}}` | `entra-output.<env>.json` → `apiIdentifierUri` |
-| `{{TENANT_ID}}` | `entra-output.<env>.json` → `tenantId` |
-| `{{PUBLISHER}}` | `-Publisher` |
-
-The client secret is **not** in these files. Paste it on the connector's **Security** tab after creating it.
-
-### 5.5 Generated and local-only files
-
-- **`entra-output.<env>.json`**: written by `Setup-EntraApps.ps1`; holds tenant ID, client IDs, identifier URI and redirect URIs. Not secret, but git-ignored because it's environment-specific. Keep a copy somewhere the team can reach (e.g. alongside the vaulted client secret), since `Build-ConnectorDefinition.ps1` needs it.
-- **`src/SetEmailCategory/local.settings.json`**: copy from `local.settings.json.example`. Holds the dev app's secret (identity H). Never commit it.
-- **`global.json`**: pins SDK 10.0.x (`rollForward: latestFeature`). The workflow installs `10.0.x`.
-- **`host.json`**: Functions host v2, OpenTelemetry mode. Nothing environment-specific.
+`az` with Bicep, PowerShell 7.2+ (or Cloud Shell), `gh` (with the `workflow` scope to push workflow changes, and SSO-authorised for the organisation if required), `pac`, and the ExchangeOnlineManagement module (installed by `Grant-MailboxAccess.ps1` if missing). The .NET 10 SDK and Functions Core Tools are only for local builds.
 
 ---
 
-## 6. Setup order checklist
+## 6. Configuration files
 
-The order matters: some values only exist after an earlier step.
+| File | Committed | Edit when |
+|---|---|---|
+| `infra/env/<env>.bicepparam` | Yes | Setting up or changing an environment |
+| `infra/main.bicep`, `infra/modules/*.bicep` | Yes | Defaults, resources, app settings, Easy Auth, roles |
+| `.github/workflows/deploy.yml` | Yes | Adding an environment (`workflow_dispatch` options) |
+| `connector/*.json` | Yes (templates) | Changing the API or connector auth |
+| `connector/dist/<env>/`, `entra-output.<env>.json`, `local.settings.json` | No (git-ignored) | Generated by scripts, or local only. Keep a team copy of `entra-output.<env>.json`. |
+
+### 6.1 Parameter file
+
+`infra/env/<env>.bicepparam` must match the GitHub environment name. The deploy job stops before what-if if any `'<...>'` placeholder remains.
+
+| Parameter | Prod value / default | Notes |
+|---|---|---|
+| `environmentName` | `prod` | `dev`, `test` or `prod` only |
+| `location` | `australiaeast` (default: RG location) | Must support Flex Consumption |
+| `sharedMailboxAddress` | `<shared-mailbox-address>` | Same address as `Grant-MailboxAccess.ps1` |
+| `apiAppClientId` | From `entra-output.<env>.json` | App D |
+| `allowedClientApplicationIds` | `[ '<connectorClientId>' ]` | App E |
+| `tags` | Mandatory tags | `workload` and `environment` are added automatically |
+| `alertEmailAddresses` | Ops list (default `[]`, no alerts) | |
+| `enablePrivateNetworking` | `true` (default `false`) | Required by policy (A6) |
+| `vnetAddressPrefix` / `appSubnetPrefix` / `privateEndpointSubnetPrefix` | `10.60.0.0/24` / `.0/26` / `.64/27` | Set from IPAM if peering (A8) |
+| `createPrivateDnsZones` | `true` | `false` with central private DNS (A8) |
+| `alwaysReadyInstances` | `0` | `1` removes cold starts at a fixed cost |
+| `workload` | `setemailcat` | 3–12 lowercase letters/digits; used in every name |
+| `maximumInstanceCount` / `httpPerInstanceConcurrency` | `40` / `50` | Minimum 40; keeps bursts on one instance |
+| `graphConcurrencyPerInstance` / `requestDeadlineSeconds` | `4` / `90` | Graph's per-mailbox limit; must stay under Power Automate's 120 s |
+| `instanceMemoryMB` / `logRetentionDays` / `throttlingAlertThreshold` | `512` / `90` / `10` | |
+
+Names are `<type>-<workload>-<env>-<suffix>`, the suffix from `uniqueString(resourceGroup().id, workload, env)`. Check before committing:
+
+```bash
+az bicep build-params --file infra/env/prod.bicepparam --stdout > /dev/null
+az deployment group what-if -g <resource-group-name> --parameters infra/env/prod.bicepparam
+```
+
+### 6.2 What Bicep sets on the function app
+
+Overwritten on every deployment, so don't edit these in the portal.
+
+- **App settings:** host storage over managed identity (`AzureWebJobsStorage__credential`, blob and table URIs); App Insights with Entra auth; `SharedMailbox__Address`; `Security__RequireAuthenticatedCaller` and `Security__RequireEasyAuthEnabled` = `true` (change only per runbook troubleshooting *500 Service misconfigured*); `Processing__MaxConcurrentGraphRequests` and `Processing__DeadlineSeconds` from parameters.
+- **Easy Auth:** requires authentication (`Return401`, `/api/health` excluded); issuer `https://login.microsoftonline.com/<tenant>/v2.0`; audiences `<apiAppClientId>` and `api://<apiAppClientId>`; allowed clients `allowedClientApplicationIds`; token store off.
+- **Platform:** HTTPS only, TLS 1.2, FTP and SCM basic auth disabled.
+
+### 6.3 Workflow and connector
+
+- **Workflow:** PRs build and test; pushes to `main` touching code, infra or the workflow build and deploy to `prod`; *Run workflow* picks an environment. One deployment per environment at a time. It reads the four variables and the Bicep outputs `functionAppName`, `functionAppHostName` and `functionAppPrincipalId`. The smoke test expects `/api/health` to report the new commit, `runningInAzure: true` and `acceptingRequests: true`, and an unauthenticated POST to return 401.
+- **Connector:** `Build-ConnectorDefinition.ps1` fills `{{FUNCTION_HOST}}` (from the run summary), `{{CONNECTOR_CLIENT_ID}}`, `{{API_IDENTIFIER_URI}}`, `{{TENANT_ID}}` (from `entra-output.<env>.json`) and `{{PUBLISHER}}`, writing `connector/dist/<env>/`. Paste the client secret on the connector's **Security** tab; it's never in these files.
+
+---
+
+## 7. Setup order
 
 | # | Step | Produces | Runbook |
 |---|---|---|---|
-| 0 | Get answers to the [target environment questionnaire](#before-you-start-target-environment-questionnaire); resolve anything that isn't "no change" | Confirmed design fit, region, mailbox, approvers | – |
-| 1 | Pick region, register providers, confirm shared mailbox, create caller group F and service account G | Region, mailbox address, group object ID | Phase 0 |
-| 2 | `Setup-EntraApps.ps1 -Environment prod -CallerGroupObjectId <id>`; vault the client secret | Apps D and E, `entra-output.prod.json` | Phase 1 |
-| 3 | Fill `infra/env/prod.bicepparam`; commit via PR | Parameter file | Phase 2 |
-| 4 | `Setup-GitHubOidc.ps1 ... -SetGitHubVariables` | Identity B, RG, 4 GitHub variables | Phase 3 |
-| 5 | Set environment protection rules and branch protection (sections 4.2, 4.3) | | Phase 3 |
-| 6 | Run *build-and-deploy* (Actions → Run workflow) | Function app, identity C; summary shows app name, host name, principal ID | Phase 4 |
-| 7 | `Grant-MailboxAccess.ps1`; wait 30 min – 2 h | Exchange scope for C | Phase 5 |
-| 8 | `Build-ConnectorDefinition.ps1`, `pac connector create`, paste secret, `Setup-EntraApps.ps1 -ConnectorRedirectUri ...`, DLP | Custom connector | Phase 6 |
-| 9 | Create connection as service account G, build flow | Flow | Phase 7 |
+| 0 | Close the open items in [section 1](#1-environment-decisions) | Final design, values | – |
+| 1 | Register providers; confirm mailbox; create F and G | Group object ID | Phase 0 |
+| 2 | `Setup-EntraApps.ps1 -Environment prod -CallerGroupObjectId <id>`; vault the secret | D, E, `entra-output.prod.json` | Phase 1 |
+| 3 | Fill `prod.bicepparam`; commit via PR | Parameter file | Phase 2 |
+| 4 | `Setup-GitHubOidc.ps1 -ResourceGroup <resource-group-name> -Location australiaeast ... -SetGitHubVariables` | B, 4 variables | Phase 3 |
+| 5 | Environment protection and branch protection (sections 5.2, 5.3) | | Phase 3 |
+| 6 | Run *build-and-deploy* | Function app, C | Phase 4 |
+| 7 | `Grant-MailboxAccess.ps1`; wait 30 min – 2 h | Exchange scope | Phase 5 |
+| 8 | Build and create the connector (in `<solution-unique-name>`), paste secret, add redirect URI | Connector | Phase 6 |
+| 9 | Create the connection as G; build the flow | Flow | Phase 7 |
 | 10 | End-to-end checks | | Phase 8 |
 
 ---
 
-## 7. Adding another environment (dev or test)
+## 8. Adding a dev or test environment
 
-| Item | Change |
-|---|---|
-| Shared mailbox | A **separate test mailbox**. Never point non-production at production. |
-| Apps D, E | `Setup-EntraApps.ps1 -Environment dev` (creates *SetEmailCategory API (dev)* / *Connector (dev)*) |
-| Parameter file | Copy `prod.bicepparam` to `infra/env/dev.bicepparam`, set `environmentName = 'dev'` and the dev values |
-| Resource group + identity B | `Setup-GitHubOidc.ps1 -ResourceGroup rg-setemailcat-dev -GitHubEnvironment dev -SetGitHubVariables` |
-| GitHub environment | `dev`, with its own four variables. Protection rules optional; you may allow feature branches. |
-| Workflow | Add `dev` to `workflow_dispatch.inputs.environment.options` |
-| Exchange | `Grant-MailboxAccess.ps1` against the dev function app and test mailbox |
-| Connector | Separate connector per environment, ideally in a separate Power Platform environment |
-
-`environmentName`, `-Environment` and `-GitHubEnvironment` only accept `dev`, `test` and `prod`.
+Use `<test-mailbox-address>`, never the production mailbox. Run `Setup-EntraApps.ps1 -Environment dev`; copy `prod.bicepparam` to `dev.bicepparam` with dev values; run `Setup-GitHubOidc.ps1 -GitHubEnvironment dev -SetGitHubVariables`; add `dev` to the workflow's environment options; run `Grant-MailboxAccess.ps1` against the dev app; and create a separate connector, ideally in a separate Power Platform environment. Only `dev`, `test` and `prod` are accepted.
 
 ---
 
-## 8. Verification commands
+## 9. Verification commands
 
 ```bash
-ENV=prod; RG=rg-setemailcat-$ENV; ID=id-github-setemailcat-$ENV; REPO=WilliamBuckAustralia/SetEmailCategory
+ENV=prod; RG=<resource-group-name>; ID=id-github-setemailcat-$ENV; REPO=WilliamBuckAustralia/SetEmailCategory
 
-# GitHub: environment, variables, protection
+# GitHub: variables, environment protection, branch protection
 gh variable list --env $ENV --repo $REPO
 gh api repos/$REPO/environments/$ENV --jq '{protection_rules, deployment_branch_policy}'
-gh api repos/$REPO/environments/$ENV/deployment-branch-policies --jq '.branch_policies[] | {name, type}'
 gh api repos/$REPO/branches/main/protection --jq '.required_status_checks.contexts'
 
-# OIDC: the subject GitHub will send vs. what Azure trusts
+# OIDC: subject GitHub sends vs. what Azure trusts
 gh api repos/$REPO/actions/oidc/customization/sub --jq .sub_claim_prefix
 az identity federated-credential list -g $RG --identity-name $ID --query "[].{name:name, subject:subject}" -o table
 
-# Deployment identity roles (expect Contributor and Role Based Access Control Administrator with a condition)
+# Deployment identity roles: Contributor, and RBAC Administrator with a condition
 P=$(az identity show -g $RG -n $ID --query principalId -o tsv)
 az role assignment list --assignee $P --scope $(az group show -n $RG --query id -o tsv) \
   --query "[].{role:roleDefinitionName, conditional:condition!=null}" -o table
-
-# Variables match the identity
 [ "$(az identity show -g $RG -n $ID --query clientId -o tsv)" = "$(gh variable get AZURE_CLIENT_ID --env $ENV --repo $REPO)" ] && echo "client id OK"
 
-# Parameter file has no placeholders left
+# Parameter file and Entra apps
 grep -n "'<" infra/env/$ENV.bicepparam && echo "placeholders remain" || echo "parameter file OK"
-
-# Entra apps
 az ad app list --display-name "SetEmailCategory" --query "[].{name:displayName, appId:appId}" -o table
 az ad app credential list --id <connectorClientId> --query "[].{name:displayName, expires:endDateTime}" -o table
 
-# After the first deployment: function identity has no app permissions, e.g. Graph or Exchange Online (expect empty)
+# After deployment: no app permissions on the function identity (expect empty), and health
 FUNC=$(az functionapp list -g $RG --query "[0].name" -o tsv)
 FP=$(az functionapp identity show -g $RG -n $FUNC --query principalId -o tsv)
 az rest --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$FP/appRoleAssignments" --query "value[].appRoleId"
-
-# Health endpoint (anonymous)
 curl -s https://$(az functionapp show -g $RG -n $FUNC --query defaultHostName -o tsv)/api/health
 ```
 
 ---
 
-## 9. Current state of this repo (2026-10-18)
+## 10. Status (2026-10-18)
 
-A snapshot of what can be checked from the repo and GitHub. Re-check with section 8.
+Nothing on the Azure, Entra ID, Exchange or Power Platform side has been set up. [Section 7](#7-setup-order) is the to-do list.
 
-The repo has moved to [`WilliamBuckAustralia/SetEmailCategory`](https://github.com/WilliamBuckAustralia/SetEmailCategory). A migration doesn't reliably carry over GitHub environments, environment variables, protection rules or Actions run history, so the GitHub rows below are unchecked until someone with access to the organisation runs section 8.
-
-**Nothing on the Azure, Entra ID, Exchange or Power Platform side has been checked or set up**, because the target environment isn't known yet. Treat every step in [section 6](#6-setup-order-checklist) as outstanding, starting with step 0 (the questionnaire). Section 6, not this table, is the to-do list.
-
-| Item | State | To do |
-|---|---|---|
-| Target environment | **Unknown** | [Questionnaire](#before-you-start-target-environment-questionnaire) |
-| Azure resource group, deployment identity, Entra apps, Exchange scope, connector | **Not checked; assume none exist** | Section 6, steps 1–10 |
-| GitHub environment `prod` | **Not checked since the migration** | Section 4.2 (`Setup-GitHubOidc.ps1 -SetGitHubVariables` creates it) |
-| `prod` variables | **Not checked since the migration.** None were ever set, and no deployment has succeeded: the only deploy run (2026-10-12, before the move) failed at `azure/login` with "Not all values are present. Ensure 'client-id' and 'tenant-id' are supplied." | Section 4.1 |
-| `prod` protection rules | **Not checked since the migration**; there were none before it | Section 4.2 |
-| Branch protection on `main` | **Not checked since the migration**; there was none before it | Section 4.3 |
-| OIDC subject | **Not checked**; expected immutable format, `repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>` | Check with section 8; `Setup-GitHubOidc.ps1` then registers the matching subject ([OIDC subject format](#oidc-subject-format)) |
-| `infra/env/prod.bicepparam` | **Placeholders** for mailbox, app IDs, tags, alert email | Section 5.1 |
-| Default workflow permissions | **Not checked since the migration**; may be set by organisation policy | Section 4.4 |
-| Repository secrets | None needed | – |
+| Item | State |
+|---|---|
+| Environment decisions | Mostly answered. **Open:** naming convention (A6, template change), networking (A8), E2, G1, Flex availability and quota (A2), and the placeholder values. |
+| `infra/env/prod.bicepparam` | `location` and `enablePrivateNetworking` set; placeholders remain for mailbox, app IDs, tags and alert email |
+| GitHub (environment `prod`, variables, protection rules, branch protection, Actions settings) | Not checked since the move to `WilliamBuckAustralia`; migrations don't reliably carry these over. Before the move none were set and no deployment had succeeded. Check with section 9. |
+| OIDC subject | Not checked; expected `repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>` |
