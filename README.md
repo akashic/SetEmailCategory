@@ -13,7 +13,7 @@ Power Automate flow ──(custom connector, Entra ID OAuth)──► Azure Func
 ```
 
 **Security model**
-- **Who can call it:** only tokens issued to the custom connector's app registration, and optionally only for members of one security group. App Service Authentication validates them before any code runs.
+- **Who can call it:** only tokens issued to the custom connector's app registration, for members of one security group. App Service Authentication validates them before any code runs. The function changes the mailbox with its own permission, not the caller's, so that group is the real access boundary: make it the people who already have access to the shared mailbox. `Setup-EntraApps.ps1` requires the group unless you explicitly pass `-AllowAnyTenantUser`.
 - **What it can touch:** the function's managed identity has **no** tenant-wide Graph permission. Exchange Online RBAC for Applications grants `Mail.ReadWrite` on that one shared mailbox, and nothing else.
 - **No stored secrets in Azure or GitHub:** storage and Application Insights use the managed identity, and deployment uses GitHub OIDC. The only secret is the connector's OAuth client secret, which lives in Power Platform.
 
@@ -34,9 +34,9 @@ Optional resources, controlled by deployment parameters:
 | Resource | When deployed | Purpose |
 |---|---|---|
 | **Virtual network and subnets** | `enablePrivateNetworking` is `true` | Provides a delegated subnet for Function App VNet integration and a separate subnet for private endpoints. |
-| **Storage private endpoints** | `enablePrivateNetworking` is `true` | Provide private connectivity from the VNet to the storage account's blob, queue, and table services; public network access to storage is disabled. |
+| **Storage private endpoints** | `enablePrivateNetworking` is `true` | Provide private connectivity from the VNet to the storage account's blob and table services (the app doesn't use queues); public network access to storage is disabled. |
 | **Private DNS zones, VNet links, and endpoint DNS zone groups** | Private networking is enabled and `createPrivateDnsZones` is `true` | Resolve the storage private endpoints from the VNet. Set `createPrivateDnsZones` to `false` when private DNS is managed centrally. |
-| **Monitoring action group and metric alert** | `alertEmailAddresses` is non-empty | Sends email notifications when Application Insights reports failed requests. |
+| **Monitoring action group and log search alerts** | `alertEmailAddresses` is non-empty | Email when the function returns 500 or 502 (needs action), sustained 503s (Graph throttling beyond retries), or 400/409/413 (a flow sending invalid input). |
 
 The deployment also configures managed-identity role assignments, Function App authentication and diagnostics, and publishing-credential policies. Entra app registrations and Exchange Online mailbox scoping are set up separately using the scripts described in the [runbook](docs/RUNBOOK.md).
 
@@ -57,7 +57,7 @@ Supply `messageId`, `internetMessageId`, or (recommended) both. Outlook message 
 
 | Status | Meaning | Does a retry help? |
 |---|---|---|
-| 200 | `{ messageId, categories, changed }`. `changed: false` means the message already had the categories. | – |
+| 200 | `{ messageId, categories, changed }`. `changed: false` means the message already had the categories. Only `add` and `remove` report `false`; `replace` writes without reading the message first, so it always reports `true`. | – |
 | 400 | Invalid input (including a `mode` that isn't one of the three names), or Graph rejected the request permanently (details in the `application/problem+json` body) | No |
 | 401 / 403 | Not authenticated, or the calling app isn't allowed | No |
 | 404 | Message not in the shared mailbox (deleted, or moved and no `internetMessageId` supplied) | No |

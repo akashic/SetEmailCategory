@@ -30,9 +30,14 @@ param(
 
     [string] $Workload = 'SetEmailCategory',
 
-    # Optional security group whose members may use the connector. When set, the API requires assignment,
-    # so users outside the group cannot obtain a token for it at all.
+    # Security group whose members may use the connector. The API then requires assignment, so users outside the
+    # group cannot obtain a token for it at all. Required unless -AllowAnyTenantUser is passed: the function acts
+    # with its own mailbox permission, so without a group anyone the connector is shared with can change categories
+    # on any message in the shared mailbox, whether or not they have access to that mailbox themselves.
     [string] $CallerGroupObjectId,
+
+    # Explicitly accept that any user in the tenant may obtain a token for the API (e.g. a dev environment).
+    [switch] $AllowAnyTenantUser,
 
     # Per-connector redirect URI shown on the custom connector's Security tab after it is created.
     [string] $ConnectorRedirectUri,
@@ -48,6 +53,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+
+if (-not $CallerGroupObjectId -and -not $AllowAnyTenantUser) {
+    throw ('Pass -CallerGroupObjectId with the security group allowed to use the connector (normally the people who ' +
+        'already have access to the shared mailbox). To let any user in the tenant call the API, pass -AllowAnyTenantUser.')
+}
 
 $GraphUri = 'https://graph.microsoft.com/v1.0'
 # Stable ID so re-runs never create a second scope.

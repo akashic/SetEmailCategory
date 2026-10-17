@@ -34,7 +34,7 @@ All scripts are PowerShell 7 and run unchanged in **Azure Cloud Shell** (PowerSh
    ```
    `Microsoft.App` is needed only for private networking (Flex VNet integration uses subnet delegation to `Microsoft.App/environments`).
 3. **Confirm the shared mailbox exists** and note its primary SMTP address.
-4. **Decide on a caller group (recommended).** Create an Entra security group containing the people or service account who own the flows, for example `SG-SetEmailCategory-Users`. Only its members will be able to create a connection to the connector.
+4. **Create a caller group.** Create an Entra security group containing the people or service account who own the flows, for example `SG-SetEmailCategory-Users`. Only its members will be able to create a connection to the connector. The function changes the mailbox with its own permission, so members can change categories on any message in the shared mailbox: limit the group to people who already have access to that mailbox. `Setup-EntraApps.ps1` refuses to run without it unless you pass `-AllowAnyTenantUser`.
 5. **Check Azure Policy.** This template already disables storage shared keys, blob public access, FTP/basic auth and App Insights local auth, and enforces TLS 1.2. If your landing zone requires extra tags or diagnostic settings, add them to `tags` in the parameter file.
 
 ## Phase 1: Entra ID app registrations
@@ -44,7 +44,7 @@ All scripts are PowerShell 7 and run unchanged in **Azure Cloud Shell** (PowerSh
 ```
 
 This creates two app registrations:
-- **SetEmailCategory API (prod).** This is the resource the function validates tokens for. It exposes the `user_impersonation` scope and issues v2.0 tokens. With `-CallerGroupObjectId`, the API requires assignment, so only group members can get a token.
+- **SetEmailCategory API (prod).** This is the resource the function validates tokens for. It exposes the `user_impersonation` scope and issues v2.0 tokens. The API requires assignment to the caller group, so only group members can get a token.
 - **SetEmailCategory Connector (prod).** This is the OAuth client used by the custom connector. It gets admin consent to the API scope and a client secret.
 
 **The client secret is printed once.** Store it in your password vault immediately, because Phase 6 needs it. Record its expiry date in your secret-rotation calendar.
@@ -74,12 +74,12 @@ These values are identifiers, not secrets, so commit the file.
 
 ```powershell
 ./scripts/Setup-GitHubOidc.ps1 -SubscriptionId <sub-id> -ResourceGroup rg-setemailcat-prod -Location <region> `
-    -GitHubRepository <org>/SetEmailCategory -GitHubEnvironment prod -SetGitHubVariables
+    -GitHubRepository WilliamBuckAustralia/SetEmailCategory -GitHubEnvironment prod -SetGitHubVariables
 ```
 
 This creates the resource group (if needed) and a user-assigned managed identity. GitHub can only use that identity from the `prod` environment of this repo. The script grants it:
 - **Contributor** on the resource group only.
-- **Role Based Access Control Administrator** on the resource group, with a condition that it can only assign the four data roles the function needs (Storage Blob/Queue/Table data roles and Monitoring Metrics Publisher), and only to service principals.
+- **Role Based Access Control Administrator** on the resource group, with a condition that it can only assign the three roles the function needs (Storage Blob Data Owner, Storage Table Data Contributor and Monitoring Metrics Publisher), and only to service principals.
 
 It writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` and `AZURE_RESOURCE_GROUP` as variables on the GitHub environment. Without `-SetGitHubVariables`, it prints them for you to add by hand.
 
@@ -114,7 +114,7 @@ az functionapp deployment source config-zip -g rg-setemailcat-prod -n <functionA
 ```
 
 The script:
-1. **Refuses to continue** if the managed identity has any Microsoft Graph application permission in Entra ID. Exchange RBAC grants are *added to* Entra grants, so a tenant-wide `Mail.ReadWrite` in Entra would make the mailbox scope meaningless.
+1. **Refuses to continue** if the managed identity has any Microsoft Graph or Office 365 Exchange Online application permission in Entra ID. Exchange RBAC grants are *added to* Entra grants, so a tenant-wide grant such as Graph `Mail.ReadWrite` or Exchange `full_access_as_app` would make the mailbox scope meaningless.
 2. Registers the managed identity in Exchange (`New-ServicePrincipal`).
 3. Creates a management scope containing only the shared mailbox, and assigns the **Application Mail.ReadWrite** role within that scope.
 4. Runs `Test-ServicePrincipalAuthorization` to prove the shared mailbox is **in scope** and the negative-test mailbox is **out of scope**.
@@ -172,7 +172,7 @@ The script:
 ## Phase 8: End-to-end verification
 
 - [ ] Send a test email to the shared mailbox. The flow runs, the action returns 200, and Outlook shows the category. If it returns **500 "Service misconfigured"** instead, see the troubleshooting row for it: this first authenticated call is what proves the platform reports Easy Auth as enabled.
-- [ ] Re-run the same flow run. It returns 200 with `changed: false`, which shows the call is idempotent.
+- [ ] Re-run the same flow run. With mode `add` or `remove` it returns 200 with `changed: false`, which shows the call is idempotent. (`replace` always reports `changed: true`, because it writes without reading the message first.)
 - [ ] Call the connector with a made-up message ID. It returns 404.
 - [ ] In Application Insights → **Transaction search**, find the request by its correlation ID.
 - [ ] `curl -X POST https://<host>/api/messages/categories` with no token returns 401.
@@ -211,7 +211,15 @@ requests
 | project timestamp, calls, instances, graphRetries, throttled
 ```
 
-If `alertEmailAddresses` is set, an alert emails the list whenever any request fails in a 15-minute window.
+If `alertEmailAddresses` is set, three log search alerts email the list:
+
+| Alert | Fires when | Severity | Usually means |
+|---|---|---|---|
+| `server-errors` | Any 500 or 502 in 15 minutes | 2 | Misconfiguration (Easy Auth disabled, mailbox access missing or still propagating) or a bug. See the troubleshooting table. |
+| `graph-throttling` | More than `throttlingAlertThreshold` (default 10) 503s in 15 minutes | 2 | Graph throttling or an outage outlasting retries. A few 503s during a burst are normal and retried by the flow. |
+| `caller-errors` | Any 400, 409 or 413 in an hour | 3 | A flow is sending invalid input. 404 is excluded: messages deleted before the flow runs make it routine. |
+
+401 and 403 never reach the function (App Service Authentication answers them first), so no alert covers them.
 
 ### Secret rotation (connector client secret)
 
@@ -235,7 +243,7 @@ Flex Consumption has no deployment slots, so you roll back by redeploying a prev
 ### Private networking
 
 Set `enablePrivateNetworking = true` to:
-- make storage reachable only through private endpoints (blob, queue, table), and
+- make storage reachable only through private endpoints (blob and table), and
 - integrate the function with a new VNet for outbound traffic.
 
 **Inbound** stays public, protected by Entra ID, because Power Platform's cloud connectors must reach it.
@@ -267,6 +275,34 @@ Set `enablePrivateNetworking = true` to:
 | Smoke test "new version did not come up" | App failed to start, often from a missing `SharedMailbox__Address` | Application Insights → Failures / traces for startup exceptions. |
 | Deployment fails assigning roles | Pipeline identity lacks the constrained RBAC Administrator role | Re-run `Setup-GitHubOidc.ps1`. |
 
+### One-off cleanup for deployments made before the queue role and metric alert were removed
+
+The pipeline deploys in incremental mode, so resources the template no longer defines stay in Azure. Environments first deployed before this change still have a queue role assignment, a `failed-requests` metric alert and, with private networking, a queue private endpoint and DNS zone. They're harmless but unused (the old alert also duplicates the new ones). Remove them once, after the new template has deployed, as someone with Owner or User Access Administrator on the resource group:
+
+```bash
+RG=rg-setemailcat-prod
+FUNC=<functionAppName>
+ST=$(az resource list -g $RG --resource-type Microsoft.Storage/storageAccounts --query "[0].name" -o tsv)
+PRINCIPAL=$(az functionapp identity show -g $RG -n $FUNC --query principalId -o tsv)
+
+az role assignment delete --assignee "$PRINCIPAL" --role "Storage Queue Data Contributor" \
+  --scope "$(az storage account show -g $RG -n $ST --query id -o tsv)"
+
+# Old metric alert (named alert-<workload>-<env>-<suffix>-failed-requests)
+az monitor metrics alert list -g $RG --query "[?ends_with(name, '-failed-requests')].name" -o tsv \
+  | xargs -r -I{} az monitor metrics alert delete -g $RG -n {}
+
+# Only if enablePrivateNetworking is true. Deleting the endpoint removes its DNS zone group; a zone with VNet links
+# can't be deleted, so remove the links first. Skip the zone steps if a hub manages private DNS centrally.
+ZONE=privatelink.queue.core.windows.net
+az network private-endpoint delete -g $RG -n "pe-$ST-queue"
+az network private-dns link vnet list -g $RG -z $ZONE --query "[].name" -o tsv \
+  | xargs -r -I{} az network private-dns link vnet delete -g $RG -z $ZONE -n {} --yes
+az network private-dns zone delete -g $RG -n $ZONE --yes
+```
+
+`Setup-GitHubOidc.ps1` doesn't update an existing deployment identity's role condition, so in these environments it can still assign the queue role. That's harmless (it's still limited to the listed roles); re-create the RBAC Administrator assignment if you want the tighter list.
+
 ### Decommissioning
 
 1. Delete the flows and the custom connector, and remove the connector from the DLP policy.
@@ -285,10 +321,10 @@ Set `enablePrivateNetworking = true` to:
 | Control | Implementation |
 |---|---|
 | Caller authentication | Entra ID OAuth (delegated) through the custom connector. App Service Authentication validates issuer, audience and calling app before code runs. |
-| Caller authorisation | `allowedApplications` = connector app only. Optional assignment-required group on the API app. |
+| Caller authorisation | `allowedApplications` = connector app only. Assignment-required caller group on the API app (opting out needs `-AllowAnyTenantUser`). The function uses its own mailbox permission, so the group should match who already has access to the shared mailbox. |
 | Defence in depth | The function also rejects requests without an Easy Auth principal header, which the platform strips from client requests. It fails closed: if App Service Authentication is ever disabled, it refuses every request. |
-| Mailbox access | System-assigned managed identity. Exchange RBAC for Applications grants `Mail.ReadWrite` on **one** mailbox, and **no** Entra Graph permission (the script enforces this). |
+| Mailbox access | System-assigned managed identity. Exchange RBAC for Applications grants `Mail.ReadWrite` on **one** mailbox, and **no** Entra application permission on Microsoft Graph or Office 365 Exchange Online (the script enforces this). |
 | Secrets | None in Azure or GitHub. Storage and App Insights use Entra ID. Deployment uses OIDC federation. One OAuth client secret is held by Power Platform and rotated per the procedure above. |
-| Deployment privilege | RG-scoped Contributor, plus RBAC Administrator constrained by ABAC to four data roles for service principals. |
+| Deployment privilege | RG-scoped Contributor, plus RBAC Administrator constrained by ABAC to three roles for service principals. |
 | Platform hardening | HTTPS only, TLS 1.2+, FTP/SCM basic auth disabled, storage shared keys and public blob access disabled, App Insights local auth disabled. Optional private endpoints. |
 | Audit | Caller identity, correlation ID and Graph request IDs are logged to Application Insights. Function logs go to Log Analytics (90-day default retention). Message content is never logged. |

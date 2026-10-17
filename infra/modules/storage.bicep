@@ -7,8 +7,9 @@ param privateEndpointSubnetId string
 param vnetId string
 param createPrivateDnsZones bool
 
-// The Functions host uses blob (leases, keys, deployment package), queue and table services.
-var privateServices = ['blob', 'queue', 'table']
+// The Functions host uses blob (leases, keys, deployment package) and table (diagnostic events). Queue storage is
+// only used by blob triggers, Durable Functions and some trigger retries, none of which this HTTP-only app has.
+var privateServices = ['blob', 'table']
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName

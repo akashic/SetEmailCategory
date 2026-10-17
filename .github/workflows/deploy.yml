@@ -78,6 +78,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Placeholders are valid strings, so ARM can accept them and deploy an app that rejects or fails every call.
+      - name: Check parameter file
+        run: |
+          file="infra/env/$ENVIRONMENT.bicepparam"
+          [[ -f "$file" ]] || { echo "::error file=$file::Parameter file not found for environment '$ENVIRONMENT'"; exit 1; }
+          if grep -n "'<" "$file"; then
+            echo "::error file=$file::Replace the '<...>' placeholders listed above before deploying (docs/AZURE-DEPLOYMENT-SETUP.md, section 5.1)."
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v8
         with:
           name: app

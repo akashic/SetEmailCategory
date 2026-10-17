@@ -108,6 +108,8 @@ public sealed partial class MailCategoryService(
 
             if (request.Mode == CategoryMode.Replace)
             {
+                // The result doesn't depend on the current categories, so skip the read (one less Graph request
+                // against the per-mailbox limit). The trade-off: replace always reports Changed = true.
                 desired = request.Categories;
             }
             else

@@ -59,7 +59,7 @@ A1 below can also be a blocker: if Microsoft 365 is in **GCC High or DoD**, the 
 |---|---|---|
 | I1 | Can someone with **Application Administrator** run `Setup-EntraApps.ps1`, or do app registrations go through a request process? | **Script allowed:** no change. **Request process:** give them the specification in [section 2.5](#25-d-and-e-entra-app-registrations), and write `entra-output.<env>.json` by hand from what they create. |
 | I2 | Are **client secrets** allowed on app registrations, and is their **maximum lifetime** capped by an app management policy? | **Allowed, no cap below 12 months:** no change. **Capped:** pass `-SecretValidityMonths` within the cap and plan rotations accordingly. **Secrets forbidden:** the connector's OAuth setup uses a client secret, so an exception is needed (or the connector authentication design has to be revisited). |
-| I3 | Can we create a **security group** for callers and set **Assignment required** on the API app? | **Yes:** no change. **No:** skip `-CallerGroupObjectId`; any user in the tenant can then create a connection, though only through the connector. |
+| I3 | Can we create a **security group** for callers and set **Assignment required** on the API app? | **Yes:** no change. **No:** pass `-AllowAnyTenantUser` instead of `-CallerGroupObjectId`. Any user the connector is shared with can then change categories on any message in the shared mailbox, even without access to the mailbox, so get the mailbox owner's sign-off first. |
 | I4 | Can we have a **dedicated, licensed service account** for the flow, and can it be **excluded from sign-in frequency and compliant-device Conditional Access policies** for the API app? | **Yes:** no change ([section 2.7](#27-g-power-automate-service-account)). **No exclusion:** the connection expires on the policy's schedule and must be re-authenticated each time; plan who does it. **No service account:** the flow runs as a person and breaks when they leave or reset their password. |
 
 ### Exchange / Microsoft 365 team
@@ -82,7 +82,7 @@ A1 below can also be a blocker: if Microsoft 365 is in **GCC High or DoD**, the 
 
 | # | Question | If the answer is… |
 |---|---|---|
-| G1 | Will the repo stay at **`akashic/SetEmailCategory`**, or move to an organisation? | **Stays:** no change. **Moves:** the OIDC subject changes (owner name and ID). Re-run `Setup-GitHubOidc.ps1` after the move and check the organisation's Actions policies (allowed actions, OIDC subject templates) against [section 4.4](#44-actions-and-oidc-settings). |
+| G1 | Does the **WilliamBuckAustralia** organisation (or its enterprise) restrict Actions (allowed actions, default workflow permissions) or set a **custom OIDC subject template**? | **No:** no change. **Restricts actions:** allow the ones listed in [section 4.4](#44-actions-and-oidc-settings). **Custom subject template:** `Setup-GitHubOidc.ps1` stops; create the federated credential by hand to match the `sub` claim the template produces. |
 | G2 | Who should **approve production deployments**? | Their GitHub usernames go into the `prod` environment's required reviewers ([section 4.2](#42-environment-protection-rules-recommended)). |
 
 ### Sources
@@ -107,7 +107,7 @@ A1 and A8 were checked against Microsoft Learn on 2026-10-16. Cloud availability
 ```
 GitHub Actions (deploy job, environment: prod)
    │  1. requests an OIDC token (permissions: id-token: write)
-   │     sub = repo:akashic@648205/SetEmailCategory@1415034508:environment:prod
+   │     sub = repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>:environment:prod
    ▼
 Microsoft Entra ID
    │  2. matches the token to a federated credential on the
@@ -116,7 +116,7 @@ Microsoft Entra ID
 azure/login@v3 (client-id / tenant-id / subscription-id from GitHub environment variables)
    │  3. az deployment group create  →  infra/main.bicep + infra/env/prod.bicepparam
    │        Contributor on the RG creates the resources
-   │        RBAC Administrator (ABAC-constrained) assigns the function's 4 data roles
+   │        RBAC Administrator (ABAC-constrained) assigns the function's 3 roles
    │  4. az functionapp deployment source config-zip  →  app.zip
    ▼
 Function App (system-assigned managed identity)
@@ -170,16 +170,15 @@ Created by [`scripts/Setup-GitHubOidc.ps1`](../scripts/Setup-GitHubOidc.ps1) (ru
 | Location / RG | The deployment resource group, e.g. `rg-setemailcat-prod`. The script creates the RG if it doesn't exist, in `-Location`. **That region is where everything deploys**, because `main.bicep` defaults `location` to the RG's region. |
 | Federated credential issuer | `https://token.actions.githubusercontent.com` |
 | Federated credential audience | `api://AzureADTokenExchange` |
-| Federated credential subject | **`repo:akashic@648205/SetEmailCategory@1415034508:environment:<env>`** (see [OIDC subject format](#oidc-subject-format)) |
+| Federated credential subject | **`repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>:environment:<env>`** (see [OIDC subject format](#oidc-subject-format); the script fills in the IDs) |
 | Role 1 | **Contributor**, scope = the resource group only |
 | Role 2 | **Role Based Access Control Administrator**, scope = the resource group, with an ABAC condition (below) |
 
-**Why the RBAC Administrator role, and why it's constrained.** The Bicep template assigns four roles to the function's managed identity, which requires `Microsoft.Authorization/roleAssignments/write`. Contributor doesn't include that. Rather than grant Owner or User Access Administrator, the script grants RBAC Administrator with a condition that allows creating or deleting assignments only for:
+**Why the RBAC Administrator role, and why it's constrained.** The Bicep template assigns three roles to the function's managed identity, which requires `Microsoft.Authorization/roleAssignments/write`. Contributor doesn't include that. Rather than grant Owner or User Access Administrator, the script grants RBAC Administrator with a condition that allows creating or deleting assignments only for:
 
 | Role | ID |
 |---|---|
 | Storage Blob Data Owner | `b7e6dc6d-f1e8-4753-8033-0f276bb0955b` |
-| Storage Queue Data Contributor | `974c5e8b-45b9-4653-ba55-5f855dd0fb88` |
 | Storage Table Data Contributor | `0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3` |
 | Monitoring Metrics Publisher | `3913510d-42f4-4e42-8a64-420c390055eb` |
 
@@ -189,14 +188,14 @@ The subject is environment-scoped, so **only a job that declares `environment: <
 
 #### OIDC subject format
 
-Entra only accepts the token if its `sub` claim matches the federated credential's subject exactly. This repository has GitHub's [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/) turned on, so the subject includes the owner and repo IDs as well as their names:
+Entra only accepts the token if its `sub` claim matches the federated credential's subject exactly. Repositories created since July 2026, which includes this one after its migration to `WilliamBuckAustralia`, get GitHub's [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/) by default, so the subject includes the owner and repo IDs as well as their names. Check what the repo actually issues:
 
 ```bash
-$ gh api repos/akashic/SetEmailCategory/actions/oidc/customization/sub
-{"use_default":true,"use_immutable_subject":true,"sub_claim_prefix":"repo:akashic@648205/SetEmailCategory@1415034508"}
+$ gh api repos/WilliamBuckAustralia/SetEmailCategory/actions/oidc/customization/sub
+{"use_default":true,"use_immutable_subject":true,"sub_claim_prefix":"repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>"}
 ```
 
-The deploy job's token therefore carries `sub = repo:akashic@648205/SetEmailCategory@1415034508:environment:prod`. The older name-based form (`repo:akashic/SetEmailCategory:environment:prod`) would never match and `azure/login` would fail with `AADSTS700213: No matching federated identity record found`.
+With that output, the deploy job's token carries `sub = repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>:environment:prod`. The older name-based form (`repo:WilliamBuckAustralia/SetEmailCategory:environment:prod`) would never match and `azure/login` would fail with `AADSTS700213: No matching federated identity record found`.
 
 `Setup-GitHubOidc.ps1` handles this for you:
 
@@ -205,7 +204,7 @@ The deploy job's token therefore carries `sub = repo:akashic@648205/SetEmailCate
 - Once a credential with the immutable subject exists, it deletes any credential still holding the name-based subject. That follows [Microsoft's migration guidance](https://learn.microsoft.com/entra/workload-id/workload-identities-github-immutable-subjects): a name-based trust would also accept a future repo that reuses this name.
 - It stops with an error if `github-<env>` holds some other subject, or if the repo uses a custom OIDC subject template. Fix those by hand.
 
-If the repo is ever transferred or recreated, its IDs change: re-run the script to update the credential.
+If the repo is ever transferred or recreated, its owner and repo IDs change, and so does the subject. The script won't overwrite a `github-<env>` credential that holds a different repo's subject: delete it (`az identity federated-credential delete -g <rg> --identity-name <identity> -n github-<env> --yes`), then re-run the script. This applies to any deployment identity created before the repo moved to `WilliamBuckAustralia`.
 
 #### Manual equivalent (no script)
 
@@ -218,7 +217,7 @@ PRINCIPAL=$(az identity show -g $RG -n $ID --query principalId -o tsv)
 CLIENT=$(az identity show -g $RG -n $ID --query clientId -o tsv)
 RG_ID=$(az group show -n $RG --query id -o tsv)
 
-PREFIX=$(gh api repos/akashic/SetEmailCategory/actions/oidc/customization/sub --jq .sub_claim_prefix)
+PREFIX=$(gh api repos/WilliamBuckAustralia/SetEmailCategory/actions/oidc/customization/sub --jq .sub_claim_prefix)
 az identity federated-credential create -g $RG --identity-name $ID --name github-$ENV \
   --issuer https://token.actions.githubusercontent.com --subject "$PREFIX:environment:$ENV" \
   --audiences api://AzureADTokenExchange
@@ -236,15 +235,15 @@ Created and configured by Bicep; nothing to do by hand except the Exchange step.
 
 | Grant | Where | Set by |
 |---|---|---|
-| Storage Blob Data Owner, Queue Data Contributor, Table Data Contributor on the storage account | Azure RBAC | `functionApp.bicep` (`storageRoleAssignments`) |
+| Storage Blob Data Owner and Table Data Contributor on the storage account (no queue role: the app has HTTP triggers only) | Azure RBAC | `functionApp.bicep` (`storageRoleAssignments`) |
 | Monitoring Metrics Publisher on Application Insights | Azure RBAC | `functionApp.bicep` (`metricsPublisher`) |
 | Deployment package container read (Flex `functionAppConfig.deployment.storage`) | Uses the blob role above | `functionApp.bicep` |
 | `Application Mail.ReadWrite` on **one** shared mailbox | Exchange Online RBAC for Applications (management scope `SetEmailCategory - <address>`, role assignment `SetEmailCategory - <functionAppName> - Mail.ReadWrite`) | `scripts/Grant-MailboxAccess.ps1` (runbook Phase 5) |
-| **No** Microsoft Graph application permissions in Entra | – | `Grant-MailboxAccess.ps1` refuses to run if any exist |
+| **No** Microsoft Graph or Office 365 Exchange Online application permissions in Entra | – | `Grant-MailboxAccess.ps1` refuses to run if any exist |
 
 The identity's object ID is printed in the deploy run summary and is a Bicep output (`functionAppPrincipalId`).
 
-> **Never** add `Mail.ReadWrite` (or any `Mail.*`) as a Graph application permission to this identity in Entra. Exchange RBAC grants are *added* to Entra grants, so it would give the function access to every mailbox. See [the lesson](lessons/2026-10-12-2038-exchange-rbac-for-apps-adds-to-entra-graph-grants.md).
+> **Never** add `Mail.ReadWrite` (or any `Mail.*`) as a Graph application permission, or `full_access_as_app` as an Office 365 Exchange Online one, to this identity in Entra. Exchange RBAC grants are *added* to Entra grants, so it would give the function access to every mailbox. See [the lesson](lessons/2026-10-12-2038-exchange-rbac-for-apps-adds-to-entra-graph-grants.md).
 
 The identity is recreated if the function app is deleted and redeployed. Its new object ID needs `Grant-MailboxAccess.ps1` run again.
 
@@ -260,7 +259,7 @@ Created by [`scripts/Setup-EntraApps.ps1`](../scripts/Setup-EntraApps.ps1) (runb
 | Application ID URI | `api://<apiAppClientId>` | Connector's resource URL; Easy Auth accepts it as audience |
 | Exposed scope | `user_impersonation` (type User), stable ID derived from workload/env | Connector requests it |
 | `api.requestedAccessTokenVersion` | `2` | Easy Auth's issuer is the v2.0 endpoint (`.../<tenant>/v2.0`) |
-| Enterprise app → *Assignment required* | Yes, when `-CallerGroupObjectId` is given | Only group members can get a token |
+| Enterprise app → *Assignment required* | Yes (unless `-AllowAnyTenantUser`) | Only group members can get a token |
 | Users and groups | Caller group F, default access role | |
 | API permissions / secrets | **None** | The API app never calls anything |
 
@@ -279,7 +278,9 @@ Two values from these registrations go into the Bicep parameter file (section 5.
 
 ### 2.6 F: Caller security group
 
-Optional but recommended (runbook Phase 0, step 4). Create a **security** group (not Microsoft 365), e.g. `SG-SetEmailCategory-Users`, containing the Power Automate service account (G) and any flow authors. Pass its object ID to `Setup-EntraApps.ps1 -CallerGroupObjectId`. Users outside it get `AADSTS50105` when creating a connection.
+Required unless you deliberately pass `-AllowAnyTenantUser` (runbook Phase 0, step 4). Create a **security** group (not Microsoft 365), e.g. `SG-SetEmailCategory-Users`, containing the Power Automate service account (G) and any flow authors. Pass its object ID to `Setup-EntraApps.ps1 -CallerGroupObjectId`. Users outside it get `AADSTS50105` when creating a connection.
+
+The function changes the mailbox with its own permission, not the caller's, so this group is the real access boundary. Members can change categories on any message in the shared mailbox, and read a message's categories, so limit it to people who already have access to that mailbox.
 
 ### 2.7 G: Power Automate service account
 
@@ -316,7 +317,7 @@ Runbook Phase 0.
 
 ## 4. GitHub configuration
 
-Repo: `akashic/SetEmailCategory` (public).
+Repo: [`WilliamBuckAustralia/SetEmailCategory`](https://github.com/WilliamBuckAustralia/SetEmailCategory) on github.com (GitHub Enterprise Cloud). Organisation or enterprise policies can override some repository settings below; where they do, the policy wins.
 
 ### 4.1 Environment variables (required)
 
@@ -336,7 +337,7 @@ Set them with `Setup-GitHubOidc.ps1 -SetGitHubVariables`, or by hand:
 ```bash
 for kv in AZURE_CLIENT_ID=<client-id> AZURE_TENANT_ID=<tenant-id> \
           AZURE_SUBSCRIPTION_ID=<sub-id> AZURE_RESOURCE_GROUP=rg-setemailcat-prod; do
-  gh variable set "${kv%%=*}" --env prod --repo akashic/SetEmailCategory --body "${kv#*=}"
+  gh variable set "${kv%%=*}" --env prod --repo WilliamBuckAustralia/SetEmailCategory --body "${kv#*=}"
 done
 ```
 
@@ -359,7 +360,7 @@ The environment name must match exactly: the workflow's `environment:` value, th
 UI: **Settings → Environments → prod**. Or with the API:
 
 ```bash
-REPO=akashic/SetEmailCategory
+REPO=WilliamBuckAustralia/SetEmailCategory
 REVIEWER_ID=$(gh api users/<reviewer-login> --jq .id)
 
 gh api -X PUT repos/$REPO/environments/prod --input - <<EOF
@@ -387,7 +388,7 @@ Every push to `main` that touches `src/`, `tests/`, `infra/` or the workflow dep
 | Block force pushes and deletion | On |
 
 ```bash
-gh api -X PUT repos/akashic/SetEmailCategory/branches/main/protection --input - <<'EOF'
+gh api -X PUT repos/WilliamBuckAustralia/SetEmailCategory/branches/main/protection --input - <<'EOF'
 {
   "required_status_checks": { "strict": true, "contexts": ["build"] },
   "enforce_admins": false,
@@ -406,9 +407,9 @@ Or use a repository ruleset (**Settings → Rules → Rulesets**) with the same 
 | Setting | Where | Required value |
 |---|---|---|
 | Actions enabled | Settings → Actions → General | Allow actions. The workflow uses `actions/checkout`, `actions/setup-dotnet`, `actions/upload-artifact`, `actions/download-artifact` and `azure/login`; if you restrict to selected actions, allow those. |
-| Default workflow permissions | Settings → Actions → General | **Read repository contents** (currently set). The workflow declares `contents: read` at the top and adds `id-token: write` only on the deploy job, which is what lets it request an OIDC token. Don't remove that line. |
-| OIDC subject claim | `gh api repos/<repo>/actions/oidc/customization/sub` | Leave as is (default template, immutable subject on). If you change the template or the immutable setting, re-run `Setup-GitHubOidc.ps1` so the federated credential subject matches again. |
-| Fork PR workflows | Settings → Actions → General | Require approval for first-time contributors (default for public repos). Fork PRs only run the `build` job and can't reach Azure. |
+| Default workflow permissions | Settings → Actions → General | **Read repository contents** (the organisation or enterprise may already enforce this). The workflow declares `contents: read` at the top and adds `id-token: write` only on the deploy job, which is what lets it request an OIDC token. Don't remove that line. |
+| OIDC subject claim | `gh api repos/<repo>/actions/oidc/customization/sub` | Default template with the immutable subject on (expected for a repo created since July 2026; check with the command). If the template or the immutable setting changes, including through an organisation policy, re-run `Setup-GitHubOidc.ps1` so the federated credential subject matches again. |
+| Fork PR workflows | Settings → Actions → General | If the organisation allows forks of private or internal repos, require approval for fork pull request workflows. Fork PRs only run the `build` job and can't reach Azure. |
 
 ### 4.5 Local tooling for whoever runs the setup
 
@@ -416,7 +417,7 @@ Or use a repository ruleset (**Settings → Rules → Rulesets**) with the same 
 |---|---|
 | Azure CLI (`az`) with Bicep | `az bicep install` |
 | PowerShell 7.2+ | All scripts. On Apple silicon use `brew install powershell` (formula), not the stale cask. Azure Cloud Shell works too. |
-| GitHub CLI (`gh`) | Needed by `Setup-GitHubOidc.ps1` (to read the OIDC subject format and for `-SetGitHubVariables`) and for the API calls above. To push changes under `.github/workflows/`, the token needs the `workflow` scope: `gh auth refresh -h github.com -s workflow`. |
+| GitHub CLI (`gh`) | Needed by `Setup-GitHubOidc.ps1` (to read the OIDC subject format and for `-SetGitHubVariables`) and for the API calls above. To push changes under `.github/workflows/`, the token needs the `workflow` scope: `gh auth refresh -h github.com -s workflow`. The signed-in account needs access to `WilliamBuckAustralia/SetEmailCategory`; if the organisation enforces SAML SSO, authorise the token for it (`gh auth login` does this in the browser). |
 | ExchangeOnlineManagement module | Installed by `Grant-MailboxAccess.ps1` if missing |
 | Power Platform CLI (`pac`) | For `pac connector create` |
 | .NET 10 SDK, Azure Functions Core Tools 4 | Local build/run only |
@@ -439,7 +440,7 @@ Or use a repository ruleset (**Settings → Rules → Rulesets**) with the same 
 
 ### 5.1 `infra/env/<env>.bicepparam` (required, per environment)
 
-The deploy job passes `infra/env/$ENVIRONMENT.bicepparam`, so the file name must match the GitHub environment name. All values are identifiers, so commit the file. **Every `'<...>'` placeholder must be replaced before the first deployment.** Nothing checks them: a placeholder either fails the deployment or produces an app that rejects or fails every call.
+The deploy job passes `infra/env/$ENVIRONMENT.bicepparam`, so the file name must match the GitHub environment name. All values are identifiers, so commit the file. **Every `'<...>'` placeholder must be replaced before the first deployment.** The deploy job's *Check parameter file* step stops before what-if if any remain, because a placeholder can otherwise deploy an app that rejects or fails every call.
 
 | Parameter | Required | Value | Source |
 |---|---|---|---|
@@ -466,6 +467,7 @@ Parameters with defaults in `main.bicep` that you can also set here:
 | `vnetAddressPrefix` / `appSubnetPrefix` / `privateEndpointSubnetPrefix` | `10.60.0.0/24` / `.0/26` / `.64/27` | Only with private networking; pick from your IPAM if peering |
 | `createPrivateDnsZones` | `true` | `false` if a hub manages `privatelink.*` zones |
 | `logRetentionDays` | `90` | 30–730 |
+| `throttlingAlertThreshold` | `10` | 503s in 15 minutes before the throttling alert fires. Raise it if bursts trip it while flows still succeed. |
 
 Resource names are derived as `<type>-<workload>-<env>-<6-char suffix>`, with the suffix from `uniqueString(resourceGroup().id, workload, env)`. They stay stable as long as the RG, workload and environment don't change.
 
@@ -483,7 +485,7 @@ Set by Bicep on every deployment. **Don't change them in the portal**: the next 
 | App setting | Value | From |
 |---|---|---|
 | `AzureWebJobsStorage__credential` | `managedidentity` | Fixed |
-| `AzureWebJobsStorage__blobServiceUri` / `__queueServiceUri` / `__tableServiceUri` | Storage endpoints | Storage module |
+| `AzureWebJobsStorage__blobServiceUri` / `__tableServiceUri` | Storage endpoints | Storage module |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | App Insights connection string | Monitoring module |
 | `APPLICATIONINSIGHTS_AUTHENTICATION_STRING` | `Authorization=AAD` | Fixed (local auth is off) |
 | `SharedMailbox__Address` | `sharedMailboxAddress` | Parameter file |
@@ -583,7 +585,7 @@ The order matters: some values only exist after an earlier step.
 ## 8. Verification commands
 
 ```bash
-ENV=prod; RG=rg-setemailcat-$ENV; ID=id-github-setemailcat-$ENV; REPO=akashic/SetEmailCategory
+ENV=prod; RG=rg-setemailcat-$ENV; ID=id-github-setemailcat-$ENV; REPO=WilliamBuckAustralia/SetEmailCategory
 
 # GitHub: environment, variables, protection
 gh variable list --env $ENV --repo $REPO
@@ -610,7 +612,7 @@ grep -n "'<" infra/env/$ENV.bicepparam && echo "placeholders remain" || echo "pa
 az ad app list --display-name "SetEmailCategory" --query "[].{name:displayName, appId:appId}" -o table
 az ad app credential list --id <connectorClientId> --query "[].{name:displayName, expires:endDateTime}" -o table
 
-# After the first deployment: function identity has no Graph app permissions (expect empty)
+# After the first deployment: function identity has no app permissions, e.g. Graph or Exchange Online (expect empty)
 FUNC=$(az functionapp list -g $RG --query "[0].name" -o tsv)
 FP=$(az functionapp identity show -g $RG -n $FUNC --query principalId -o tsv)
 az rest --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$FP/appRoleAssignments" --query "value[].appRoleId"
@@ -621,9 +623,11 @@ curl -s https://$(az functionapp show -g $RG -n $FUNC --query defaultHostName -o
 
 ---
 
-## 9. Current state of this repo (2026-10-16)
+## 9. Current state of this repo (2026-10-18)
 
 A snapshot of what can be checked from the repo and GitHub. Re-check with section 8.
+
+The repo has moved to [`WilliamBuckAustralia/SetEmailCategory`](https://github.com/WilliamBuckAustralia/SetEmailCategory). A migration doesn't reliably carry over GitHub environments, environment variables, protection rules or Actions run history, so the GitHub rows below are unchecked until someone with access to the organisation runs section 8.
 
 **Nothing on the Azure, Entra ID, Exchange or Power Platform side has been checked or set up**, because the target environment isn't known yet. Treat every step in [section 6](#6-setup-order-checklist) as outstanding, starting with step 0 (the questionnaire). Section 6, not this table, is the to-do list.
 
@@ -631,11 +635,11 @@ A snapshot of what can be checked from the repo and GitHub. Re-check with sectio
 |---|---|---|
 | Target environment | **Unknown** | [Questionnaire](#before-you-start-target-environment-questionnaire) |
 | Azure resource group, deployment identity, Entra apps, Exchange scope, connector | **Not checked; assume none exist** | Section 6, steps 1–10 |
-| GitHub environment `prod` | Exists | – |
-| `prod` variables | **None set** | Section 4.1. The only deploy run so far ([run 38204564920](https://github.com/akashic/SetEmailCategory/actions/runs/38204564920), 2026-10-12) failed at `azure/login` with "Not all values are present. Ensure 'client-id' and 'tenant-id' are supplied." |
-| `prod` protection rules | **None**; any branch can deploy | Section 4.2 |
-| Branch protection on `main` | **None** | Section 4.3 |
-| OIDC subject | Immutable format on (`repo:akashic@648205/SetEmailCategory@1415034508`) | Nothing extra: `Setup-GitHubOidc.ps1` registers the matching subject ([OIDC subject format](#oidc-subject-format)) |
+| GitHub environment `prod` | **Not checked since the migration** | Section 4.2 (`Setup-GitHubOidc.ps1 -SetGitHubVariables` creates it) |
+| `prod` variables | **Not checked since the migration.** None were ever set, and no deployment has succeeded: the only deploy run (2026-10-12, before the move) failed at `azure/login` with "Not all values are present. Ensure 'client-id' and 'tenant-id' are supplied." | Section 4.1 |
+| `prod` protection rules | **Not checked since the migration**; there were none before it | Section 4.2 |
+| Branch protection on `main` | **Not checked since the migration**; there was none before it | Section 4.3 |
+| OIDC subject | **Not checked**; expected immutable format, `repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>` | Check with section 8; `Setup-GitHubOidc.ps1` then registers the matching subject ([OIDC subject format](#oidc-subject-format)) |
 | `infra/env/prod.bicepparam` | **Placeholders** for mailbox, app IDs, tags, alert email | Section 5.1 |
-| Default workflow permissions | Read | – |
+| Default workflow permissions | **Not checked since the migration**; may be set by organisation policy | Section 4.4 |
 | Repository secrets | None needed | – |

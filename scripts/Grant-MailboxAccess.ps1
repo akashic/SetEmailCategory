@@ -6,8 +6,9 @@
 
 .DESCRIPTION
     RBAC for Applications grants are additive with Entra ID application permissions. If the managed identity
-    also had Microsoft Graph Mail.* permissions consented in Entra ID, it could access EVERY mailbox and this
-    scope would be meaningless - so the script refuses to continue if it finds any.
+    also had Microsoft Graph or Office 365 Exchange Online application permissions consented in Entra ID, it
+    could access EVERY mailbox and this scope would be meaningless - so the script refuses to continue if it
+    finds any.
 
     Requires:
       - Azure CLI signed in (to resolve the managed identity's appId).
@@ -43,7 +44,13 @@ $RoleName = 'Application Mail.ReadWrite'
 function Get-OrNull([scriptblock] $Query) {
     try { & $Query } catch { $null }
 }
-$GraphAppId = '00000003-0000-0000-c000-000000000000'
+
+# Application permissions on these APIs reach every mailbox in the tenant (e.g. Graph Mail.ReadWrite, or Exchange
+# Online full_access_as_app for EWS), so any of them would bypass the single-mailbox scope granted below.
+$TenantWideMailApis = [ordered]@{
+    '00000003-0000-0000-c000-000000000000' = 'Microsoft Graph'
+    '00000002-0000-0ff1-ce00-000000000000' = 'Office 365 Exchange Online'
+}
 
 # ---------------------------------------------------------------- Resolve the managed identity
 $principalId = az functionapp identity show -g $ResourceGroup -n $FunctionAppName --query principalId -o tsv
@@ -51,12 +58,15 @@ if (-not $principalId) { throw "Function app '$FunctionAppName' has no system-as
 $appId = az ad sp show --id $principalId --query appId -o tsv
 Write-Host "Managed identity: objectId=$principalId appId=$appId"
 
-# ---------------------------------------------------------------- Guard: no tenant-wide Graph grants
+# ---------------------------------------------------------------- Guard: no tenant-wide mail API grants
 $assignments = az rest --method GET --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$principalId/appRoleAssignments" | ConvertFrom-Json
-$graphSp = az ad sp show --id $GraphAppId --query id -o tsv
-$graphGrants = @($assignments.value | Where-Object resourceId -eq $graphSp)
-if ($graphGrants.Count -gt 0) {
-    throw ("The managed identity has $($graphGrants.Count) Microsoft Graph application permission(s) granted in Entra ID. " +
+$found = foreach ($api in $TenantWideMailApis.GetEnumerator()) {
+    $resourceSp = az ad sp show --id $api.Key --query id -o tsv
+    $count = @($assignments.value | Where-Object resourceId -eq $resourceSp).Count
+    if ($count -gt 0) { "$count $($api.Value)" }
+}
+if ($found) {
+    throw ("The managed identity has application permission(s) granted in Entra ID: $($found -join ', '). " +
         'These apply to ALL mailboxes and override the Exchange scope. Remove them first ' +
         "(Entra admin centre > Enterprise applications > $FunctionAppName > Permissions).")
 }

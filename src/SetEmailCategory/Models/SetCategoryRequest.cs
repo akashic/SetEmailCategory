@@ -37,7 +37,10 @@ public sealed record SetCategoryRequest(
 /// <summary>Successful response body.</summary>
 /// <param name="MessageId">The ID of the message that was updated.</param>
 /// <param name="Categories">The message's categories after the update.</param>
-/// <param name="Changed">False when the message already had the requested categories and no write was made.</param>
+/// <param name="Changed">
+/// False when the message already had the requested categories and no write was made. Only add and remove can
+/// report false: replace writes without reading the message first, so it always reports true.
+/// </param>
 public sealed record SetCategoryResponse(
     string MessageId,
     IReadOnlyList<string> Categories,

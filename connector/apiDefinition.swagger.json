@@ -85,7 +85,7 @@
       "properties": {
         "messageId": { "type": "string", "x-ms-summary": "Message Id" },
         "categories": { "type": "array", "items": { "type": "string" }, "x-ms-summary": "Categories" },
-        "changed": { "type": "boolean", "x-ms-summary": "Changed", "description": "False if the message already had the requested categories." }
+        "changed": { "type": "boolean", "x-ms-summary": "Changed", "description": "False if the message already had the requested categories (add and remove only; replace always returns true)." }
       }
     },
     "Problem": {

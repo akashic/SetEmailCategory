@@ -84,8 +84,12 @@ param createPrivateDnsZones bool = true
 @maxValue(730)
 param logRetentionDays int = 90
 
-@description('Email addresses notified when requests fail. Empty = no alerting resources are created.')
+@description('Email addresses notified by the failure alerts (500/502, sustained 503s, and caller errors 400/409/413). Empty = no alerting resources are created.')
 param alertEmailAddresses array = []
+
+@description('Alert when more than this many 503 responses occur in 15 minutes. A few are normal during bursts: Graph throttles and Power Automate retries.')
+@minValue(0)
+param throttlingAlertThreshold int = 10
 
 // ---------- Names ----------
 
@@ -169,10 +173,12 @@ module functionApp 'modules/functionApp.bicep' = {
 module alerts 'modules/alerts.bicep' = if (!empty(alertEmailAddresses)) {
   name: 'alerts'
   params: {
+    location: location
     tags: allTags
     namePrefix: baseName
     appInsightsName: monitoring.outputs.appInsightsName
     emailAddresses: alertEmailAddresses
+    throttlingThreshold: throttlingAlertThreshold
   }
 }
 

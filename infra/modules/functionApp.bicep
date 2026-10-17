@@ -21,7 +21,6 @@ param allowedClientApplicationIds array
 // Built-in role definition IDs
 var roles = {
   storageBlobDataOwner: 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
-  storageQueueDataContributor: '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
   storageTableDataContributor: '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
   monitoringMetricsPublisher: '3913510d-42f4-4e42-8a64-420c390055eb'
 }
@@ -66,10 +65,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
       ftpsState: 'Disabled'
       http20Enabled: true
       appSettings: [
-        // Host storage over managed identity (no connection strings or keys).
+        // Host storage over managed identity (no connection strings or keys). No queue service: queues are only
+        // used by blob triggers, Durable Functions and some trigger retries, and this app has HTTP triggers only.
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'AzureWebJobsStorage__blobServiceUri', value: storage.properties.primaryEndpoints.blob }
-        { name: 'AzureWebJobsStorage__queueServiceUri', value: storage.properties.primaryEndpoints.queue }
         { name: 'AzureWebJobsStorage__tableServiceUri', value: storage.properties.primaryEndpoints.table }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
         { name: 'APPLICATIONINSIGHTS_AUTHENTICATION_STRING', value: 'Authorization=AAD' }
@@ -181,8 +180,10 @@ resource diagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' 
   }
 }
 
+// Blob Data Owner is the documented minimum for AzureWebJobsStorage (and covers the deployment package).
+// Table Data Contributor lets the host persist diagnostic events.
 resource storageRoleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for roleId in [roles.storageBlobDataOwner, roles.storageQueueDataContributor, roles.storageTableDataContributor]: {
+  for roleId in [roles.storageBlobDataOwner, roles.storageTableDataContributor]: {
     name: guid(storage.id, functionApp.id, roleId)
     scope: storage
     properties: {

@@ -14,7 +14,7 @@
     - Grants it, on the resource group only:
         * Contributor
         * Role Based Access Control Administrator, constrained by an ABAC condition so it can ONLY assign the
-          four data-plane roles the Function App needs, and only to service principals.
+          three roles the Function App needs, and only to service principals.
     - Optionally writes the GitHub environment variables with the gh CLI.
 
     Requires: Azure CLI signed in as Owner (or User Access Administrator + Contributor) on the subscription/RG,
@@ -22,7 +22,7 @@
 
 .EXAMPLE
     ./Setup-GitHubOidc.ps1 -SubscriptionId 0000... -ResourceGroup rg-setemailcat-prod -Location uksouth `
-        -GitHubRepository contoso/SetEmailCategory -GitHubEnvironment prod -SetGitHubVariables
+        -GitHubRepository WilliamBuckAustralia/SetEmailCategory -GitHubEnvironment prod -SetGitHubVariables
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -47,7 +47,6 @@ $PSNativeCommandUseErrorActionPreference = $true
 # Roles the Bicep template assigns to the Function App's managed identity (infra/modules/functionApp.bicep).
 $AssignableRoles = @(
     'b7e6dc6d-f1e8-4753-8033-0f276bb0955b' # Storage Blob Data Owner
-    '974c5e8b-45b9-4653-ba55-5f855dd0fb88' # Storage Queue Data Contributor
     '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3' # Storage Table Data Contributor
     '3913510d-42f4-4e42-8a64-420c390055eb' # Monitoring Metrics Publisher
 ) -join ', '
