@@ -17,9 +17,13 @@ param tags = {
 }
 
 // Azure Policy requires private storage (docs/AZURE-DEPLOYMENT-SETUP.md, answer A6; see docs/RUNBOOK.md,
-// "Private networking"). Hub peering, central DNS and the VNet range (A8) are still open, so the defaults below
-// apply until they're answered: a standalone 10.60.0.0/24 VNet with its own privatelink DNS zones.
+// "Private networking"). The VNet ranges come from IPAM (A8, still open); placeholders keep the template's
+// 10.60.0.0/24 defaults from being deployed by accident. The defaults use a /26 app subnet and a /27 private
+// endpoint subnet, both inside the VNet range.
 param enablePrivateNetworking = true
+param vnetAddressPrefix = '<VNet CIDR from IPAM>'
+param appSubnetPrefix = '<app subnet CIDR inside the VNet, e.g. a /26>'
+param privateEndpointSubnetPrefix = '<private endpoint subnet CIDR inside the VNet, e.g. a /27>'
 
 // 1 removes cold starts (adds a small always-on cost). 0 scales to zero.
 param alwaysReadyInstances = 0

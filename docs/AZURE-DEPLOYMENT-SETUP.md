@@ -50,7 +50,7 @@ Replace each `<placeholder>` here, in the parameter file and in script arguments
 
 ### A8: networking
 
-Private storage (A6) puts storage behind private endpoints and the app's outbound traffic through a new VNet. Until A8 is answered, the template defaults apply: a standalone `10.60.0.0/24` VNet with its own `privatelink` DNS zones.
+Private storage (A6) puts storage behind private endpoints and the app's outbound traffic through a new VNet. `prod.bicepparam` holds placeholders for the three VNet ranges, so the deploy job stops until they're set from IPAM; `createPrivateDnsZones` stays at its default (`true`, the template creates its own `privatelink` zones) until A8 is answered.
 
 - **Hub with central private DNS:** `createPrivateDnsZones = false`; Azure Policy links the endpoints to the hub zones.
 - **Peering:** set `vnetAddressPrefix`, `appSubnetPrefix` and `privateEndpointSubnetPrefix` from IPAM, then peer after deployment.
@@ -312,7 +312,7 @@ A repository ruleset with the same rules works too.
 | `tags` | Mandatory tags | `workload` and `environment` are added automatically |
 | `alertEmailAddresses` | Ops list (default `[]`, no alerts) | |
 | `enablePrivateNetworking` | `true` (default `false`) | Required by policy (A6) |
-| `vnetAddressPrefix` / `appSubnetPrefix` / `privateEndpointSubnetPrefix` | `10.60.0.0/24` / `.0/26` / `.64/27` | Set from IPAM if peering (A8) |
+| `vnetAddressPrefix` / `appSubnetPrefix` / `privateEndpointSubnetPrefix` | Placeholders (defaults `10.60.0.0/24` / `.0/26` / `.64/27`) | From IPAM (A8); subnets inside the VNet range |
 | `createPrivateDnsZones` | `true` | `false` with central private DNS (A8) |
 | `alwaysReadyInstances` | `0` | `1` removes cold starts at a fixed cost |
 | `workload` | `setemailcat` | 3–12 lowercase letters/digits; used in every name |
@@ -407,6 +407,6 @@ Nothing on the Azure, Entra ID, Exchange or Power Platform side has been set up.
 | Item | State |
 |---|---|
 | Environment decisions | Mostly answered. **Open:** naming convention (A6, template change), networking (A8), E2, G1, Flex availability and quota (A2), and the placeholder values. |
-| `infra/env/prod.bicepparam` | `location` and `enablePrivateNetworking` set; placeholders remain for mailbox, app IDs, tags and alert email |
+| `infra/env/prod.bicepparam` | `location` and `enablePrivateNetworking` set; placeholders remain for mailbox, app IDs, tags, alert email and the VNet ranges |
 | GitHub (environment `prod`, variables, protection rules, branch protection, Actions settings) | Not checked since the move to `WilliamBuckAustralia`; migrations don't reliably carry these over. Before the move none were set and no deployment had succeeded. Check with section 9. |
 | OIDC subject | Not checked; expected `repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>` |
