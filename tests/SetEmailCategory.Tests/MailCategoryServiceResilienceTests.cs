@@ -7,12 +7,18 @@ using SetEmailCategory.Models;
 namespace SetEmailCategory.Tests;
 
 /// <summary>Failure modes seen when the function is driven by a Power Automate shared-mailbox trigger.</summary>
-public class MailCategoryServiceResilienceTests
+public sealed class MailCategoryServiceResilienceTests : IDisposable
 {
     private readonly FakeGraphHandler _graph = new();
+    private readonly HttpClient _http;
+
+    public MailCategoryServiceResilienceTests() =>
+        _http = new HttpClient(_graph) { BaseAddress = new Uri("https://graph.microsoft.com/v1.0/") };
+
+    public void Dispose() => _http.Dispose();
 
     private MailCategoryService CreateService() => new(
-        new HttpClient(_graph) { BaseAddress = new Uri("https://graph.microsoft.com/v1.0/") },
+        _http,
         Options.Create(new SharedMailboxOptions { Address = "shared@contoso.com" }),
         NullLogger<MailCategoryService>.Instance);
 

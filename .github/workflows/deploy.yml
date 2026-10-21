@@ -98,6 +98,12 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # Existing subnets or an NSG named in the parameter file must meet the Flex Consumption rules and William Buck
+      # policy (an NSG on every subnet). A bad one otherwise fails mid-deployment or leaves an app that can't reach storage.
+      - name: Check network prerequisites
+        shell: pwsh
+        run: ./scripts/Test-NetworkPrerequisites.ps1 -ParameterFile "infra/env/$env:ENVIRONMENT.bicepparam" -ResourceGroup $env:RESOURCE_GROUP
+
       - name: What-if
         run: >
           az deployment group what-if

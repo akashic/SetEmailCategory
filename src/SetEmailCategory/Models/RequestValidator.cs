@@ -64,9 +64,8 @@ public static class RequestValidator
         }
         else
         {
-            foreach (var raw in request.Categories)
+            foreach (var name in request.Categories.Select(raw => raw?.Trim()))
             {
-                var name = raw?.Trim();
                 if (string.IsNullOrEmpty(name))
                 {
                     problems.Add("Category names cannot be empty.");

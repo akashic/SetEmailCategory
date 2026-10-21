@@ -33,9 +33,10 @@ Optional resources, controlled by deployment parameters:
 
 | Resource | When deployed | Purpose |
 |---|---|---|
-| **Virtual network and subnets** | `enablePrivateNetworking` is `true` | Provides a delegated subnet for Function App VNet integration and a separate subnet for private endpoints. |
+| **Virtual network and subnets** | `enablePrivateNetworking` is `true` and `existingAppSubnetId` or `existingPrivateEndpointSubnetId` is unset | Provides a delegated subnet for Function App VNet integration and a separate subnet for private endpoints. Only the subnets not supplied as existing resource IDs are created. |
+| **Network security groups** | The template creates a subnet and `existingNsgId` is unset | One per created subnet, with Azure's default rules, because William Buck policy requires an NSG on every subnet. Set `existingNsgId` to attach an existing NSG instead. |
 | **Storage private endpoints** | `enablePrivateNetworking` is `true` | Provide private connectivity from the VNet to the storage account's blob and table services (the app doesn't use queues); public network access to storage is disabled. |
-| **Private DNS zones, VNet links, and endpoint DNS zone groups** | Private networking is enabled and `createPrivateDnsZones` is `true` | Resolve the storage private endpoints from the VNet. Set `createPrivateDnsZones` to `false` when private DNS is managed centrally. |
+| **Private DNS zones, VNet links, and endpoint DNS zone groups** | Private networking is enabled and `createPrivateDnsZones` is `true` | Resolve the storage private endpoints from the app's VNet. Set `createPrivateDnsZones` to `false` when private DNS is managed centrally (required when re-using an app subnet); `existingBlobPrivateDnsZoneId` and `existingTablePrivateDnsZoneId` then register the endpoints in the hub's zones. |
 | **Monitoring action group and log search alerts** | `alertEmailAddresses` is non-empty | Email when the function returns 500 or 502 (needs action), sustained 503s (Graph throttling beyond retries), or 400/409/413 (a flow sending invalid input). |
 
 The deployment also configures managed-identity role assignments, Function App authentication and diagnostics, and publishing-credential policies. Entra app registrations and Exchange Online mailbox scoping are set up separately using the scripts described in the [runbook](docs/RUNBOOK.md).

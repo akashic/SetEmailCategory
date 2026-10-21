@@ -196,10 +196,10 @@ public sealed partial class MailCategoryService(
         await EnsureSuccessAsync(response, ct);
         var page = await response.Content.ReadFromJsonAsync<GraphCollection<GraphMessage>>(ct);
 
-        return page?.Value.Count switch
+        return page?.Value switch
         {
-            1 => new CategoryOutcome(CategoryOutcomeStatus.Success, page.Value[0].Id),
-            0 or null => new CategoryOutcome(CategoryOutcomeStatus.MessageNotFound,
+            [var message] => new CategoryOutcome(CategoryOutcomeStatus.Success, message.Id),
+            null or [] => new CategoryOutcome(CategoryOutcomeStatus.MessageNotFound,
                 Detail: "The message was not found in the shared mailbox (it may have been deleted)."),
             _ => new CategoryOutcome(CategoryOutcomeStatus.AmbiguousMessage,
                 Detail: "More than one message has that internetMessageId. Supply 'messageId' instead."),

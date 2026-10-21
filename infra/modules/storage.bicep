@@ -4,8 +4,11 @@ param storageAccountName string
 param deploymentContainerName string
 param enablePrivateNetworking bool
 param privateEndpointSubnetId string
+@description('VNet the private DNS zones are linked to: the one the function app integrates with.')
 param vnetId string
 param createPrivateDnsZones bool
+@description('Existing zone IDs in privateServices order (blob, table). Used for the DNS zone groups when createPrivateDnsZones is false; an empty entry means no zone group for that service.')
+param existingPrivateDnsZoneIds array
 
 // The Functions host uses blob (leases, keys, deployment package) and table (diagnostic events). Queue storage is
 // only used by blob triggers, Durable Functions and some trigger retries, none of which this HTTP-only app has.
@@ -88,7 +91,7 @@ resource privateEndpoints 'Microsoft.Network/privateEndpoints@2024-05-01' = [
 ]
 
 resource dnsZoneGroups 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = [
-  for (service, i) in privateServices: if (enablePrivateNetworking && createPrivateDnsZones) {
+  for (service, i) in privateServices: if (enablePrivateNetworking && (createPrivateDnsZones || !empty(existingPrivateDnsZoneIds[i]))) {
     parent: privateEndpoints[i]
     name: 'default'
     properties: {
@@ -96,7 +99,7 @@ resource dnsZoneGroups 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@
         {
           name: service
           properties: {
-            privateDnsZoneId: dnsZones[i].id
+            privateDnsZoneId: createPrivateDnsZones ? dnsZones[i].id : existingPrivateDnsZoneIds[i]
           }
         }
       ]

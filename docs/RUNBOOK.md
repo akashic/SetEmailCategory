@@ -35,7 +35,7 @@ All scripts are PowerShell 7 and run unchanged in **Azure Cloud Shell** (PowerSh
    `Microsoft.App` is needed only for private networking (Flex VNet integration uses subnet delegation to `Microsoft.App/environments`).
 3. **Confirm the shared mailbox exists** and note its primary SMTP address.
 4. **Create a caller group.** Create an Entra security group containing the people or service account who own the flows, for example `SG-SetEmailCategory-Users`. Only its members will be able to create a connection to the connector. The function changes the mailbox with its own permission, so members can change categories on any message in the shared mailbox: limit the group to people who already have access to that mailbox. `Setup-EntraApps.ps1` refuses to run without it unless you pass `-AllowAnyTenantUser`.
-5. **Check Azure Policy.** This template already disables storage shared keys, blob public access, FTP/basic auth and App Insights local auth, and enforces TLS 1.2. If your landing zone requires extra tags or diagnostic settings, add them to `tags` in the parameter file.
+5. **Check Azure Policy.** This template already disables storage shared keys, blob public access, FTP/basic auth and App Insights local auth, and enforces TLS 1.2. It attaches a network security group to every subnet it creates, as William Buck policy requires. If your landing zone requires extra tags or diagnostic settings, add them to `tags` in the parameter file.
 
 ## Phase 1: Entra ID app registrations
 
@@ -65,6 +65,9 @@ Edit `infra/env/prod.bicepparam`, using values from `entra-output.prod.json`:
 | `alertEmailAddresses` | Ops distribution list |
 | `tags` | Your organisation's mandatory tags |
 | `enablePrivateNetworking` | `false` unless policy requires private storage (see [Private networking](#private-networking)) |
+| `existingAppSubnetId`, `existingPrivateEndpointSubnetId` | Resource IDs of subnets to re-use instead of creating them. Leave unset to have the template create them. See [Private networking](#private-networking). |
+| `existingNsgId` | An NSG to attach to the subnets the template creates. Leave unset to have the template create one per subnet. |
+| `createPrivateDnsZones`, `existingBlobPrivateDnsZoneId`, `existingTablePrivateDnsZoneId`, `vnetDnsServers` | How storage names resolve. Leave the defaults (the template creates its own zones) unless you re-use an app subnet or private DNS is central. See [Private networking](#private-networking). |
 | `alwaysReadyInstances` | `0` scales to zero, so the first call after idle has a cold start of a few seconds. `1` removes cold starts at a small fixed cost. |
 | Scale (`maximumInstanceCount`, `httpPerInstanceConcurrency`, `graphConcurrencyPerInstance`, `requestDeadlineSeconds`) | Leave the defaults (40 / 50 / 4 / 90). Microsoft advises at least 40 instances for HTTP apps: below that, bursts of email are rejected by the platform before reaching the code. Graph allows 4 concurrent requests per app per mailbox. The function enforces that **per instance**, so N instances can send up to 4N. A per-instance HTTP concurrency of 50 means Flex only adds a second instance when more than 50 calls are in flight at once. Below that, every call shares one instance and one 4-slot gate. Above it, Graph throttles the excess with 429 and `Retry-After`, which the function honours, so the result is slower calls, not failures. |
 
@@ -83,22 +86,30 @@ This creates the resource group (if needed) and a user-assigned managed identity
 
 It writes `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` and `AZURE_RESOURCE_GROUP` as variables on the GitHub environment. Without `-SetGitHubVariables`, it prints them for you to add by hand.
 
-Then, in GitHub, open **Settings → Environments → prod** and set:
-- **Required reviewers:** recommended for production.
-- **Deployment branches:** `main` only.
+**Existing network resources.** The script reads the network settings from the environment's parameter file (`infra/env/<env>.bicepparam`; pass `-ParameterFile` for another), so set them in Phase 2 first. It runs `Test-NetworkPrerequisites.ps1` and stops without changing anything if a setting or an existing resource breaks the rules in [Private networking](#private-networking). Then, for each existing resource outside the resource group, it grants the deployment identity only what the deployment needs, scoped to that resource:
+
+| Resource | Role |
+|---|---|
+| Existing subnet or NSG | **SetEmailCategory Network Join**, a custom role the script creates: read and join subnets and NSGs, nothing else |
+| The VNet of each existing subnet | **Reader** (VNet integration reads the VNet) |
+| Existing private DNS zone | **Private DNS Zone Contributor** (the private endpoints' DNS records are written there) |
+
+It also removes network grants from earlier runs that the parameter file no longer needs. Whoever runs it needs Owner or User Access Administrator on those resources, and permission to create a custom role on their resource groups: usually the network team. If nobody can create custom roles, add `-UseBuiltInNetworkRole` to grant **Network Contributor** instead, which also lets the pipeline change the subnet. Run with `-WhatIf` first to preview the changes, for example to send to the network team.
 
 ## Phase 4: First deployment
 
 Run the **build-and-deploy** workflow (Actions tab → *Run workflow*), or merge to `main`. The workflow:
 1. Runs the unit tests, publishes a ReadyToRun build and lints the Bicep.
-2. Runs `what-if`, then deploys the Bicep and uploads the code package.
-3. Runs a smoke test: waits until `/api/health` reports the new commit SHA, and checks that an unauthenticated call returns **401**.
+2. Checks any existing subnets or NSG named in the parameter file (`Test-NetworkPrerequisites.ps1`) and stops before deploying anything if one doesn't meet the rules.
+3. Runs `what-if`, then deploys the Bicep and uploads the code package.
+4. Runs a smoke test: waits until `/api/health` reports the new commit SHA, and checks that an unauthenticated call returns **401**.
 
 The run summary shows the **function app name**, the **endpoint URL** and the **managed identity object ID**, which you need next.
 
 <details><summary>Manual fallback (no pipeline)</summary>
 
 ```bash
+pwsh ./scripts/Test-NetworkPrerequisites.ps1 -ParameterFile infra/env/prod.bicepparam -ResourceGroup rg-setemailcat-prod
 az deployment group create -g rg-setemailcat-prod --parameters infra/env/prod.bicepparam --query properties.outputs
 dotnet publish src/SetEmailCategory -c Release -r linux-x64 --self-contained false -p:PublishReadyToRun=true -o publish
 (cd publish && zip -qr ../app.zip .)
@@ -244,12 +255,41 @@ Flex Consumption has no deployment slots, so you roll back by redeploying a prev
 
 Set `enablePrivateNetworking = true` to:
 - make storage reachable only through private endpoints (blob and table), and
-- integrate the function with a new VNet for outbound traffic.
+- integrate the function with a VNet for outbound traffic.
 
 **Inbound** stays public, protected by Entra ID, because Power Platform's cloud connectors must reach it.
 
-- **If your landing zone manages private DNS centrally** (hub `privatelink.*` zones plus Azure Policy), also set `createPrivateDnsZones = false`. Policy then links the private endpoints to the hub zones.
-- **If the VNet must peer to a hub**, adjust `vnetAddressPrefix`, `appSubnetPrefix` and `privateEndpointSubnetPrefix` to a non-overlapping range from your IPAM, and peer it after deployment.
+It needs two subnets: an **app subnet** for VNet integration and a **private endpoint subnet** for storage. A subnet delegated to Flex Consumption can't hold private endpoints, so they can't be the same subnet.
+
+**NSG rule (William Buck policy):** every subnet must have a network security group. The template attaches one to each subnet it creates: the NSG in `existingNsgId` if set, otherwise its own (`nsg-<name>-app`, `nsg-<name>-pe`) with Azure's default rules only. NSG rules are enforced for the private endpoints too. An existing subnet must already have an NSG; the template doesn't change existing subnets.
+
+**Re-using existing subnets.** Set `existingAppSubnetId`, `existingPrivateEndpointSubnetId`, or both, to a subnet's full resource ID. The template creates a VNet (`vnet-<name>`) only for the subnets not supplied, using `vnetAddressPrefix` and the matching `*SubnetPrefix`. An existing subnet must meet these rules:
+
+| Subnet | Rules |
+|---|---|
+| App | In the function app's region; NSG attached; delegated to `Microsoft.App/environments` and nothing else; IPv4 range /27 or larger (/26 if other Flex apps share it); no private endpoints or service endpoints; if it's in another subscription, that subscription has `Microsoft.Web` registered |
+| Private endpoint | In the function app's region; NSG attached; not delegated |
+
+| Supplied | Template creates | Also needed |
+|---|---|---|
+| Neither | VNet with both subnets and their NSGs | Nothing |
+| Both | No VNet | The two subnets in the same VNet, or in peered VNets |
+| App subnet only | VNet with the private endpoint subnet | **Peer** the new VNet with the app subnet's VNet, or the app can't reach storage and won't start. Deploy once to create the VNet, peer, then run the workflow again. |
+| Private endpoint subnet only | VNet with the app subnet | **Peer** the new VNet with the private endpoint subnet's VNet, as above |
+
+**Private DNS.** The app must resolve the storage private endpoints from its own VNet. Pick one:
+
+| Setup | Settings | Notes |
+|---|---|---|
+| Template's own zones (default) | `createPrivateDnsZones = true` | Zones are created in the resource group and linked to the app's VNet. **Not allowed with an existing app subnet:** a VNet can be linked to only one zone of each name, so linking ours to a shared VNet fails or takes over storage name resolution for every other workload in it. |
+| Hub zones, named | `createPrivateDnsZones = false`, `existingBlobPrivateDnsZoneId`, `existingTablePrivateDnsZoneId` | The endpoints are registered in the hub zones. The app's VNet must be linked to them, or use DNS servers that resolve them (the hub's resolver). For a VNet the template creates, set `vnetDnsServers`, or have the zones linked to it after the first deployment. |
+| Hub zones, by Azure Policy | `createPrivateDnsZones = false`, no zone IDs | Only if a policy registers private endpoints in the hub zones. Without one, the app can't resolve storage and won't start. |
+
+**Checks.** `Test-NetworkPrerequisites.ps1` checks all of this in Phase 3 and before every deployment: the rules above, combinations that can't work, peering between the two subnets' VNets, and the app VNet's links to existing zones. Peering and links to a VNet the template hasn't created yet are warnings on the first deployment and errors after it.
+
+**Plan the subnets before the first deployment.** Switching an environment to an existing subnet later makes the next deployment delete the template's subnet of that kind (the template declares its VNet's subnets in full), and that fails while the app or the private endpoints still use it. To switch, first move them by hand: the app's VNet integration to the new subnet in the portal (*Networking → Virtual network integration*), or delete the storage private endpoints. Then deploy.
+
+- **If a VNet the template creates must peer to a hub**, set `vnetAddressPrefix` and the subnet prefixes to a non-overlapping range from your IPAM, and peer it after deployment.
 - **Making inbound private as well** isn't covered by this template. It needs a function-app private endpoint, [Power Platform virtual network support](https://learn.microsoft.com/power-platform/admin/vnet-support-overview) for the environment, and self-hosted GitHub runners inside the network.
 
 ### Troubleshooting
@@ -274,6 +314,12 @@ Set `enablePrivateNetworking = true` to:
 | Smoke test "App is refusing requests" | `WEBSITE_AUTH_ENABLED` is not `True` | See the "500 Service misconfigured" row. |
 | Smoke test "new version did not come up" | App failed to start, often from a missing `SharedMailbox__Address` | Application Insights → Failures / traces for startup exceptions. |
 | Deployment fails assigning roles | Pipeline identity lacks the constrained RBAC Administrator role | Re-run `Setup-GitHubOidc.ps1`. |
+| *Check network prerequisites* fails | A network setting or existing resource breaks a rule (the step lists each one with Azure's error), or the deployment identity can't read it | Fix the setting or resource (see [Private networking](#private-networking)). For "can't be read", re-run `Setup-GitHubOidc.ps1` after changing the parameter file. |
+| Deployment fails with `LinkedAuthorizationFailed` on `subnets/join/action`, `networkSecurityGroups/join/action` or `privateDnsZones/...` | The deployment identity has no rights on an existing resource outside the resource group, usually because the parameter file changed since Phase 3 | Re-run `Setup-GitHubOidc.ps1`. |
+| `Setup-GitHubOidc.ps1` fails creating *SetEmailCategory Network Join* | No permission to create custom roles on the network resource groups, or the role already exists elsewhere in the tenant | Ask the network team to run it, or use `-UseBuiltInNetworkRole`. |
+| App never becomes healthy; storage names resolve to public IPs | No DNS zone holds the private endpoints' records, or the app's VNet can't see that zone | See *Private DNS* under [Private networking](#private-networking). |
+| Deployment denied by policy on a subnet | A subnet without an NSG, or an NSG the policy doesn't accept | The template attaches an NSG to every subnet it creates; if policy demands a specific NSG, set `existingNsgId`. |
+| App never becomes healthy after a deployment that re-uses one subnet | The new VNet isn't peered with the existing subnet's VNet, so the app can't reach storage | Peer the VNets (see [Private networking](#private-networking)), then re-run the workflow. |
 
 ### One-off cleanup for deployments made before the queue role and metric alert were removed
 
@@ -312,9 +358,16 @@ az network private-dns zone delete -g $RG -n $ZONE --yes
    Remove-ManagementScope "SetEmailCategory - <address>"
    ```
    The Exchange service-principal pointer is removed automatically when the managed identity is deleted.
-3. Delete the resource group, which removes the function app, its managed identity, storage, monitoring and the deployment identity.
-4. Delete both app registrations (*SetEmailCategory API/Connector (env)*).
-5. Delete the GitHub environment.
+3. If the deployment used existing network resources outside the resource group, remove the deployment identity's grants on them first (they'd otherwise remain as assignments to a deleted identity), and delete the *SetEmailCategory Network Join* role if nothing else uses it:
+   ```bash
+   P=$(az identity show -g rg-setemailcat-prod -n id-github-setemailcat-prod --query principalId -o tsv)
+   az role assignment list --assignee $P --all --query "[?contains(scope, '/providers/Microsoft.Network/')].id" -o tsv \
+     | xargs -r az role assignment delete --ids
+   az role definition delete --name "SetEmailCategory Network Join"
+   ```
+4. Delete the resource group, which removes the function app, its managed identity, storage, monitoring and the deployment identity.
+5. Delete both app registrations (*SetEmailCategory API/Connector (env)*).
+6. Delete the GitHub environment.
 
 ## Security summary (for review boards)
 
