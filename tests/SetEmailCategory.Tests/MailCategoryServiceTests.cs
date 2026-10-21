@@ -6,15 +6,21 @@ using SetEmailCategory.Models;
 
 namespace SetEmailCategory.Tests;
 
-public class MailCategoryServiceTests
+public sealed class MailCategoryServiceTests : IDisposable
 {
     private const string Mailbox = "shared@contoso.com";
     private const string MessagesPath = "/v1.0/users/shared%40contoso.com/messages";
 
     private readonly FakeGraphHandler _graph = new();
+    private readonly HttpClient _http;
+
+    public MailCategoryServiceTests() =>
+        _http = new HttpClient(_graph) { BaseAddress = new Uri("https://graph.microsoft.com/v1.0/") };
+
+    public void Dispose() => _http.Dispose();
 
     private MailCategoryService CreateService() => new(
-        new HttpClient(_graph) { BaseAddress = new Uri("https://graph.microsoft.com/v1.0/") },
+        _http,
         Options.Create(new SharedMailboxOptions { Address = Mailbox }),
         NullLogger<MailCategoryService>.Instance);
 
