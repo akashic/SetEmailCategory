@@ -65,17 +65,35 @@ param alwaysReadyInstances int = 0
 @description('When true: storage is reachable only through private endpoints and the function app egresses through a VNet. Inbound to the function stays public (Power Platform must reach it), protected by Entra ID.')
 param enablePrivateNetworking bool = false
 
-@description('Address space for the VNet created when enablePrivateNetworking is true.')
+@description('Resource ID of an existing subnet for Flex Consumption VNet integration. It must be in the app\'s region, delegated to Microsoft.App/environments, at least /27, with an NSG attached and no private or service endpoints. Empty = the template creates one. scripts/Test-NetworkPrerequisites.ps1 checks these rules.')
+param existingAppSubnetId string = ''
+
+@description('Resource ID of an existing subnet for the storage private endpoints. It must be in the app\'s region, not delegated, with an NSG attached. Empty = the template creates one.')
+param existingPrivateEndpointSubnetId string = ''
+
+@description('Resource ID of an existing NSG to attach to the subnets the template creates (William Buck policy requires an NSG on every subnet). Empty = the template creates one NSG per subnet, with Azure\'s default rules only. Not applied to existing subnets, which keep their own.')
+param existingNsgId string = ''
+
+@description('Address space for the VNet the template creates when private networking needs a subnet that wasn\'t supplied.')
 param vnetAddressPrefix string = '10.60.0.0/24'
 
-@description('Subnet for Flex Consumption VNet integration (delegated to Microsoft.App/environments).')
+@description('Subnet for Flex Consumption VNet integration (delegated to Microsoft.App/environments). Ignored when existingAppSubnetId is set.')
 param appSubnetPrefix string = '10.60.0.0/26'
 
-@description('Subnet for private endpoints.')
+@description('Subnet for private endpoints. Ignored when existingPrivateEndpointSubnetId is set.')
 param privateEndpointSubnetPrefix string = '10.60.0.64/27'
 
-@description('Create privatelink DNS zones in this resource group. Set false where a hub/landing zone manages private DNS centrally (e.g. via Azure Policy).')
+@description('Create privatelink DNS zones in this resource group and link them to the app\'s VNet. Set false where a hub/landing zone manages private DNS centrally, and always when existingAppSubnetId is set: a VNet can be linked to only one zone of each name, so linking ours to a shared VNet fails or hijacks other workloads\' storage name resolution.')
 param createPrivateDnsZones bool = true
+
+@description('Resource ID of an existing privatelink.blob zone (e.g. the hub\'s) to register the blob private endpoint in. Use with existingTablePrivateDnsZoneId and createPrivateDnsZones = false. Empty = no DNS zone group, so the records come from createPrivateDnsZones or Azure Policy.')
+param existingBlobPrivateDnsZoneId string = ''
+
+@description('Resource ID of an existing privatelink.table zone. See existingBlobPrivateDnsZoneId.')
+param existingTablePrivateDnsZoneId string = ''
+
+@description('Custom DNS servers for the VNet the template creates, e.g. the hub\'s DNS resolver, so it can resolve existing (hub) private DNS zones. Empty = Azure-provided DNS.')
+param vnetDnsServers array = []
 
 // ---------- Monitoring ----------
 
@@ -102,12 +120,26 @@ var names = {
   plan: 'asp-${baseName}'
   functionApp: 'func-${baseName}'
   vnet: 'vnet-${baseName}'
+  appNsg: 'nsg-${baseName}-app'
+  privateEndpointNsg: 'nsg-${baseName}-pe'
 }
 var allTags = union(tags, {
   workload: workload
   environment: environmentName
 })
 var deploymentContainerName = 'app-package'
+
+// Private networking uses an existing subnet where one is supplied and creates the rest in a new VNet. If only one
+// subnet is supplied, the two end up in different VNets, which must be peered (docs/RUNBOOK.md, "Private networking").
+var createAppSubnet = enablePrivateNetworking && empty(existingAppSubnetId)
+var createPrivateEndpointSubnet = enablePrivateNetworking && empty(existingPrivateEndpointSubnetId)
+var appSubnetId = !enablePrivateNetworking ? '' : createAppSubnet ? network!.outputs.appSubnetId : existingAppSubnetId
+var privateEndpointSubnetId = !enablePrivateNetworking
+  ? ''
+  : createPrivateEndpointSubnet ? network!.outputs.privateEndpointSubnetId : existingPrivateEndpointSubnetId
+// The private DNS zones must resolve where the app's outbound traffic comes from: the app subnet's VNet. indexOf is
+// case-insensitive, like resource IDs, so an ID pasted as .../Subnets/... still yields the VNet.
+var appVnetId = empty(appSubnetId) ? '' : substring(appSubnetId, 0, indexOf(appSubnetId, '/subnets/'))
 
 module monitoring 'modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -120,7 +152,7 @@ module monitoring 'modules/monitoring.bicep' = {
   }
 }
 
-module network 'modules/network.bicep' = if (enablePrivateNetworking) {
+module network 'modules/network.bicep' = if (createAppSubnet || createPrivateEndpointSubnet) {
   name: 'network'
   params: {
     location: location
@@ -129,6 +161,12 @@ module network 'modules/network.bicep' = if (enablePrivateNetworking) {
     vnetAddressPrefix: vnetAddressPrefix
     appSubnetPrefix: appSubnetPrefix
     privateEndpointSubnetPrefix: privateEndpointSubnetPrefix
+    createAppSubnet: createAppSubnet
+    createPrivateEndpointSubnet: createPrivateEndpointSubnet
+    existingNsgId: existingNsgId
+    dnsServers: vnetDnsServers
+    appNsgName: names.appNsg
+    privateEndpointNsgName: names.privateEndpointNsg
   }
 }
 
@@ -140,9 +178,10 @@ module storage 'modules/storage.bicep' = {
     storageAccountName: names.storage
     deploymentContainerName: deploymentContainerName
     enablePrivateNetworking: enablePrivateNetworking
-    privateEndpointSubnetId: enablePrivateNetworking ? network!.outputs.privateEndpointSubnetId : ''
-    vnetId: enablePrivateNetworking ? network!.outputs.vnetId : ''
+    privateEndpointSubnetId: privateEndpointSubnetId
+    vnetId: appVnetId
     createPrivateDnsZones: createPrivateDnsZones
+    existingPrivateDnsZoneIds: [existingBlobPrivateDnsZoneId, existingTablePrivateDnsZoneId]
   }
 }
 
@@ -163,7 +202,7 @@ module functionApp 'modules/functionApp.bicep' = {
     alwaysReadyInstances: alwaysReadyInstances
     graphConcurrencyPerInstance: graphConcurrencyPerInstance
     requestDeadlineSeconds: requestDeadlineSeconds
-    appSubnetId: enablePrivateNetworking ? network!.outputs.appSubnetId : ''
+    appSubnetId: appSubnetId
     sharedMailboxAddress: sharedMailboxAddress
     apiAppClientId: apiAppClientId
     allowedClientApplicationIds: allowedClientApplicationIds
