@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "21a96b8a-bf64-41f5-8c1b-be837d21bfc0",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/gilesgregg/Documents/GitHub/SetEmailCategory/docs/diagrams/deployment/deployment-architecture.json",
+  "output": "/Users/gilesgregg/Documents/GitHub/SetEmailCategory/docs/diagrams/deployment/deployment-architecture.html",
+  "specification": {
+    "sha256": "0faddb9c6d5bba15c90e10ee0818ff32427770cbf4ceebed7af287ca45fa2fd2",
+    "bytes": 7631
+  },
+  "artifact": {
+    "sha256": "08e807fabe4cc20c222b05eb7b42ef2d8254f5e5dcde0683715a8fb0dbc34614",
+    "bytes": 834916
+  }
+}

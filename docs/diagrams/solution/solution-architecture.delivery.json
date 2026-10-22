@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "bf2f37aa-b2dd-4c16-b9c0-2f2b9910fea5",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/gilesgregg/Documents/GitHub/SetEmailCategory/docs/diagrams/solution/solution-architecture.json",
+  "output": "/Users/gilesgregg/Documents/GitHub/SetEmailCategory/docs/diagrams/solution/solution-architecture.html",
+  "specification": {
+    "sha256": "9dd23d623e5a37796c639cf0bf0160699aea183bfadf685566318572e831fe3c",
+    "bytes": 9510
+  },
+  "artifact": {
+    "sha256": "8c9bcbaecbe4b83f4ba2ba8b99d78086b08681a153536b4984b02c9ca5e50a68",
+    "bytes": 843090
+  }
+}

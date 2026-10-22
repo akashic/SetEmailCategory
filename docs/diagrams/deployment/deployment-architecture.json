@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SetEmailCategory: deploying from GitHub Actions",
+    "output": "docs/diagrams/deployment/deployment-architecture.html",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/akashic/SetEmailCategory.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "1e18aa44916938ba8e1dd047b89114fa18a573c0"
+    }
+  },
+  "components": [
+    {
+      "id": "operator", "type": "external", "label": "Operator", "sublabel": "workflow_dispatch only",
+      "pos": [40, 40], "size": [150, 64],
+      "sources": [
+        { "path": ".github/workflows/deploy.yml", "line": 1, "end_line": 14, "label": "manual trigger" }
+      ]
+    },
+    {
+      "id": "build", "type": "backend", "label": "build job", "sublabel": "test, publish, lint Bicep", "tag": "also on PRs",
+      "pos": [300, 40], "size": [150, 64],
+      "sources": [
+        { "path": ".github/workflows/deploy.yml", "line": 23, "end_line": 57, "label": "build and app.zip" }
+      ]
+    },
+    {
+      "id": "prodenv", "type": "security", "label": "prod environment", "sublabel": "required reviewers", "tag": "main or v* only",
+      "pos": [560, 40], "size": [150, 64],
+      "sources": [
+        { "path": ".github/workflows/deploy.yml", "line": 59, "end_line": 66, "label": "environment and gate" },
+        { "path": "docs/AZURE-DEPLOYMENT-SETUP.md", "line": 263, "end_line": 267, "label": "protection rules" }
+      ]
+    },
+    {
+      "id": "deploy", "type": "backend", "label": "deploy job", "sublabel": "id-token: write", "tag": "no secrets",
+      "pos": [820, 40], "size": [150, 64],
+      "sources": [
+        { "path": ".github/workflows/deploy.yml", "line": 67, "end_line": 100, "label": "OIDC login and checks" },
+        { "path": ".github/workflows/deploy.yml", "line": 102, "end_line": 151, "label": "what-if, deploy, smoke test" }
+      ]
+    },
+    {
+      "id": "fedcred", "type": "security", "label": "Federated credential", "sublabel": "github-prod", "tag": "subject env:prod",
+      "pos": [820, 200], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 129, "end_line": 141, "label": "subject, issuer, audience" }
+      ]
+    },
+    {
+      "id": "uami", "type": "security", "label": "Deployment identity", "sublabel": "id-github-setemailcat-prod",
+      "pos": [820, 360], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 49, "label": "identity name" },
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 104, "end_line": 112, "label": "user-assigned identity" },
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 279, "end_line": 284, "label": "four GitHub variables" }
+      ]
+    },
+    {
+      "id": "resources", "type": "cloud", "label": "Workload resources", "sublabel": "func, storage, PEs, alerts",
+      "pos": [560, 360], "size": [150, 64],
+      "sources": [
+        { "path": "infra/main.bicep", "line": 144, "end_line": 222, "label": "modules deployed" },
+        { "path": ".github/workflows/deploy.yml", "line": 109, "end_line": 126, "label": "deploy infra and code" },
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 221, "label": "Contributor" }
+      ]
+    },
+    {
+      "id": "miroles", "type": "security", "label": "Function MI roles", "sublabel": "3 roles, service principal",
+      "pos": [560, 520], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 67, "end_line": 72, "label": "assignable roles" },
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 223, "end_line": 227, "label": "ABAC condition" },
+        { "path": "infra/modules/functionApp.bicep", "line": 183, "end_line": 205, "label": "assignments made" }
+      ]
+    },
+    {
+      "id": "subnets", "type": "security", "label": "Shared VNet subnets", "sublabel": "app + PE subnets", "tag": "pending N1",
+      "pos": [1080, 360], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 74, "end_line": 82, "label": "Network Join role" },
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 229, "end_line": 242, "label": "subnet and VNet grants" }
+      ]
+    },
+    {
+      "id": "dns", "type": "cloud", "label": "Hub private DNS", "sublabel": "blob + table zones", "tag": "pending N2",
+      "pos": [1080, 520], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Setup-GitHubOidc.ps1", "line": 243, "end_line": 245, "label": "DNS zone grant" },
+        { "path": "docs/openquestions.md", "line": 14, "label": "open question N2" }
+      ]
+    }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "GitHub Actions · build-and-deploy", "wraps": ["operator", "build", "prodenv", "deploy"], "pad": 18 },
+    { "kind": "region", "label": "Workload resource group", "wraps": ["fedcred", "uami", "resources", "miroles"], "pad": 18 },
+    { "kind": "region", "label": "Platform network (other RGs)", "wraps": ["subnets", "dns"], "pad": 18 }
+  ],
+  "connections": [
+    { "id": "run", "from": "operator", "to": "build", "label": "Run workflow", "variant": "emphasis" },
+    { "id": "needs-build", "from": "build", "to": "prodenv", "label": "needs: build", "variant": "emphasis" },
+    { "id": "approved", "from": "prodenv", "to": "deploy", "label": "approved", "variant": "security" },
+    { "id": "oidc", "from": "deploy", "to": "fedcred", "label": "OIDC token", "variant": "security" },
+    { "id": "exchange", "from": "fedcred", "to": "uami", "label": "Azure token", "variant": "security" },
+    { "id": "contributor", "from": "uami", "to": "resources", "label": "Contributor", "variant": "emphasis" },
+    { "id": "rbac-admin", "from": "uami", "to": "miroles", "label": "RBAC Admin (ABAC)", "variant": "security", "fromSide": "bottom", "toSide": "right" },
+    { "id": "network-join", "from": "uami", "to": "subnets", "label": "Join + Reader" },
+    { "id": "dns-grant", "from": "uami", "to": "dns", "label": "DNS Zone Contrib.", "variant": "dashed", "fromSide": "bottom", "toSide": "left" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan", "title": "Deploy job steps",
+      "items": [
+        "1. Stop if prod.bicepparam still has '<...>' placeholders",
+        "2. azure/login with the OIDC token; GitHub holds four identifiers, no secrets",
+        "3. Test-NetworkPrerequisites.ps1, then az deployment group what-if",
+        "4. az deployment group create with main.bicep and prod.bicepparam",
+        "5. config-zip puts app.zip in the app-package container",
+        "6. Smoke test: /api/health reports the commit SHA, and an unauthenticated POST gets 401"
+      ]
+    },
+    {
+      "dot": "rose", "title": "What each role allows",
+      "items": [
+        "Contributor: the workload resource group only",
+        "RBAC Administrator: only Storage Blob Data Owner, Storage Table Data Contributor and Monitoring Metrics Publisher, only to service principals",
+        "SetEmailCategory Network Join (subnet and NSG read/join) on each subnet; Reader on the VNet. -UseBuiltInNetworkRole grants Network Contributor instead",
+        "Private DNS Zone Contributor on the hub zones, if N2 names them"
+      ]
+    },
+    {
+      "dot": "amber", "title": "One-time setup",
+      "items": [
+        "An admin with Owner or User Access Administrator runs Setup-GitHubOidc.ps1",
+        "Issuer token.actions.githubusercontent.com; audience api://AzureADTokenExchange",
+        "Pull requests run the build job only: the required check on main. Merging deploys nothing"
+      ]
+    }
+  ]
+}

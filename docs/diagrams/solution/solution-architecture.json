@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SetEmailCategory: solution architecture",
+    "output": "docs/diagrams/solution/solution-architecture.html",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/akashic/SetEmailCategory.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "1e18aa44916938ba8e1dd047b89114fa18a573c0"
+    }
+  },
+  "components": [
+    {
+      "id": "flow", "type": "external", "label": "Power Automate flow", "sublabel": "custom connector",
+      "pos": [40, 200], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Build-ConnectorDefinition.ps1", "line": 3, "end_line": 5, "label": "connector definition" },
+        { "path": "scripts/Setup-EntraApps.ps1", "line": 9, "end_line": 10, "label": "connector OAuth client" }
+      ]
+    },
+    {
+      "id": "entra", "type": "security", "label": "Microsoft Entra ID", "sublabel": "API + connector apps",
+      "pos": [300, 40], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Setup-EntraApps.ps1", "line": 6, "end_line": 12, "label": "two app registrations" },
+        { "path": "scripts/Setup-EntraApps.ps1", "line": 111, "end_line": 124, "label": "v2.0 tokens" }
+      ]
+    },
+    {
+      "id": "easyauth", "type": "security", "label": "App Service Auth", "sublabel": "allowedApplications", "tag": "else 401",
+      "pos": [300, 200], "size": [150, 64],
+      "sources": [
+        { "path": "infra/modules/functionApp.bicep", "line": 111, "end_line": 150, "label": "authsettingsV2" }
+      ]
+    },
+    {
+      "id": "func", "type": "backend", "label": "Function app", "sublabel": "Flex FC1 · .NET 10", "tag": "system-assigned MI",
+      "pos": [560, 200], "size": [150, 64],
+      "sources": [
+        { "path": "infra/modules/functionApp.bicep", "line": 36, "end_line": 109, "label": "plan and site" },
+        { "path": "src/SetEmailCategory/Functions/SetCategoryFunction.cs", "line": 38, "end_line": 40, "label": "POST messages/categories" },
+        { "path": "src/SetEmailCategory/Program.cs", "line": 22, "end_line": 25, "label": "managed identity credential" }
+      ]
+    },
+    {
+      "id": "graph", "type": "cloud", "label": "Microsoft Graph", "sublabel": "4 requests / instance",
+      "pos": [820, 200], "size": [150, 64],
+      "sources": [
+        { "path": "src/SetEmailCategory/Options.cs", "line": 17, "end_line": 29, "label": "Graph v1.0 and scope" },
+        { "path": "src/SetEmailCategory/Graph/GraphConcurrencyHandler.cs", "line": 6, "end_line": 8, "label": "concurrency gate" },
+        { "path": "src/SetEmailCategory/Graph/GraphClientRegistration.cs", "line": 28, "end_line": 36, "label": "retries 429 and 5xx" }
+      ]
+    },
+    {
+      "id": "mailbox", "type": "external", "label": "Shared mailbox", "sublabel": "Exchange RBAC scope", "tag": "Mail.ReadWrite",
+      "pos": [1080, 200], "size": [150, 64],
+      "sources": [
+        { "path": "scripts/Grant-MailboxAccess.ps1", "line": 1, "end_line": 11, "label": "RBAC for Applications" },
+        { "path": "scripts/Grant-MailboxAccess.ps1", "line": 97, "end_line": 112, "label": "one-mailbox scope" },
+        { "path": "src/SetEmailCategory/Graph/MailCategoryService.cs", "line": 228, "end_line": 232, "label": "PATCH categories" }
+      ]
+    },
+    {
+      "id": "insights", "type": "cloud", "label": "App Insights", "sublabel": "+ Log Analytics, 90 d",
+      "pos": [560, 40], "size": [150, 64],
+      "sources": [
+        { "path": "infra/modules/monitoring.bicep", "line": 7, "end_line": 30, "label": "Entra-only ingestion" },
+        { "path": "infra/modules/functionApp.bicep", "line": 169, "end_line": 181, "label": "FunctionAppLogs" },
+        { "path": "infra/main.bicep", "line": 100, "end_line": 103, "label": "retention" }
+      ]
+    },
+    {
+      "id": "alerts", "type": "cloud", "label": "Alerts", "sublabel": "email action group",
+      "pos": [820, 40], "size": [150, 64],
+      "sources": [
+        { "path": "infra/modules/alerts.bicep", "line": 12, "end_line": 62, "label": "action group and rules" }
+      ]
+    },
+    {
+      "id": "appsubnet", "type": "security", "label": "App subnet", "sublabel": "delegated · NSG", "tag": "VNet integration",
+      "pos": [560, 380], "size": [150, 64],
+      "sources": [
+        { "path": "infra/env/prod.bicepparam", "line": 23, "end_line": 28, "label": "existing subnets" },
+        { "path": "infra/main.bicep", "line": 68, "end_line": 69, "label": "subnet rules" },
+        { "path": "infra/modules/functionApp.bicep", "line": 62, "label": "virtualNetworkSubnetId" }
+      ]
+    },
+    {
+      "id": "endpoints", "type": "security", "label": "Private endpoints", "sublabel": "PE subnet · NSG",
+      "pos": [820, 380], "size": [150, 64],
+      "sources": [
+        { "path": "infra/modules/storage.bicep", "line": 71, "end_line": 91, "label": "pe-blob, pe-table" },
+        { "path": "infra/main.bicep", "line": 71, "end_line": 72, "label": "PE subnet rules" }
+      ]
+    },
+    {
+      "id": "storage", "type": "database", "label": "Storage account", "sublabel": "no public access, no keys",
+      "pos": [1080, 380], "size": [150, 64],
+      "sources": [
+        { "path": "infra/modules/storage.bicep", "line": 17, "end_line": 46, "label": "account and container" },
+        { "path": "infra/modules/functionApp.bicep", "line": 183, "end_line": 195, "label": "MI data roles" }
+      ]
+    },
+    {
+      "id": "dns", "type": "cloud", "label": "Hub private DNS", "sublabel": "privatelink blob, table", "tag": "pending N2",
+      "pos": [820, 540], "size": [150, 64],
+      "sources": [
+        { "path": "infra/env/prod.bicepparam", "line": 30, "end_line": 35, "label": "hub zones, not created" },
+        { "path": "infra/modules/storage.bicep", "line": 93, "end_line": 108, "label": "DNS zone groups" },
+        { "path": "docs/openquestions.md", "line": 14, "label": "open question N2" }
+      ]
+    }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "Platform shared VNet (other RG) · IDs pending N1", "wraps": ["appsubnet", "endpoints"], "pad": 18 },
+    { "kind": "region", "label": "Platform hub", "wraps": ["dns"], "pad": 18 },
+    { "kind": "region", "label": "Microsoft 365", "wraps": ["graph", "mailbox"], "pad": 18 }
+  ],
+  "connections": [
+    { "id": "flow-token", "from": "flow", "to": "entra", "label": "OAuth token", "variant": "security" },
+    { "id": "flow-call", "from": "flow", "to": "easyauth", "label": "HTTPS POST", "variant": "emphasis" },
+    { "id": "auth-verify", "from": "easyauth", "to": "entra", "label": "v2.0 issuer", "variant": "security" },
+    { "id": "auth-pass", "from": "easyauth", "to": "func", "label": "authorised", "variant": "emphasis" },
+    { "id": "func-graph", "from": "func", "to": "graph", "label": "PATCH message", "variant": "emphasis" },
+    { "id": "graph-mailbox", "from": "graph", "to": "mailbox", "label": "one mailbox", "variant": "emphasis" },
+    { "id": "func-telemetry", "from": "func", "to": "insights", "label": "telemetry", "variant": "dashed" },
+    { "id": "insights-alerts", "from": "insights", "to": "alerts", "label": "log queries", "variant": "dashed" },
+    { "id": "func-egress", "from": "func", "to": "appsubnet", "label": "all outbound" },
+    { "id": "subnet-endpoints", "from": "appsubnet", "to": "endpoints", "label": "blob + table" },
+    { "id": "endpoints-storage", "from": "endpoints", "to": "storage", "label": "Private Link", "variant": "security" },
+    { "id": "endpoints-dns", "from": "endpoints", "to": "dns", "label": "A records", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan", "title": "How the function is called",
+      "items": [
+        "The flow's custom connector calls POST /api/messages/categories with an Entra ID v2.0 token",
+        "Easy Auth accepts only tokens issued to the connector app (allowedApplications); anything else gets 401 before code runs",
+        "/api/health is excluded from authentication",
+        "Each request has a 90 s deadline, under Power Automate's 120 s limit"
+      ]
+    },
+    {
+      "dot": "emerald", "title": "Identity and permissions",
+      "items": [
+        "The function uses its system-assigned managed identity for Graph, storage and telemetry: no secrets",
+        "Exchange RBAC for Applications grants Mail.ReadWrite on one shared mailbox; no tenant-wide Graph permission",
+        "Storage Blob Data Owner and Storage Table Data Contributor on storage; Monitoring Metrics Publisher on App Insights",
+        "At most 4 Graph requests per instance; 429s and 5xx are retried"
+      ]
+    },
+    {
+      "dot": "violet", "title": "Networking",
+      "items": [
+        "Inbound stays public (Power Platform must reach it), protected by Entra ID",
+        "All outbound traffic, including Graph, leaves through the app subnet, delegated to Microsoft.App/environments",
+        "Storage has public access and shared keys disabled; blob and table are reachable only through private endpoints",
+        "The VNet is shared, so the template creates no DNS zones (createPrivateDnsZones = false)"
+      ]
+    },
+    {
+      "dot": "amber", "title": "Monitoring and alerts",
+      "items": [
+        "App Insights ingestion is Entra-authenticated only; Log Analytics keeps 90 days",
+        "500/502: any in 15 min. 503: more than 10 in 15 min (Graph throttling)",
+        "400/409/413: any in 1 h. Emails go to the ops action group"
+      ]
+    }
+  ]
+}
