@@ -1,15 +1,10 @@
 name: build-and-deploy
 
+# Deployment is manual only (Actions -> build-and-deploy -> Run workflow). Pull requests run the build job alone,
+# which provides the 'build' status check; merging to main deploys nothing.
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'infra/**'
-      - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
       environment:
@@ -62,7 +57,7 @@ jobs:
           retention-days: 30
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || 'prod' }}
