@@ -17,32 +17,22 @@ param tags = {
 }
 
 // Azure Policy requires private storage (docs/AZURE-DEPLOYMENT-SETUP.md, answer A6; see docs/RUNBOOK.md,
-// "Private networking"). William Buck policy requires an NSG on every subnet: the template attaches one to each
-// subnet it creates, and existing subnets must already have one.
+// "Private networking").
 param enablePrivateNetworking = true
 
-// An existing subnet is being re-used (A11). Set the one(s) that exist; Setup-GitHubOidc.ps1 reads this file to
-// grant access to them. The template creates any subnet left unset in a new VNet; if only one is set, the two
-// VNets must be peered. Each value is a full resource ID, e.g.
-// /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>
-// param existingAppSubnetId = ''             // delegated to Microsoft.App/environments, /27 or larger
-// param existingPrivateEndpointSubnetId = '' // not delegated
-// param existingNsgId = ''                   // optional: attach this NSG to created subnets instead of new ones
+// Both subnets already exist in the platform team's shared VNet (A11), so the template creates no VNet, subnets
+// or NSGs; the platform team's subnets carry the NSGs William Buck policy requires (A10). Full resource IDs, e.g.
+// /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>.
+// Setup-GitHubOidc.ps1 reads them from this file to grant the deployment access.
+param existingAppSubnetId = '<app subnet resource ID: delegated to Microsoft.App/environments, /27 or larger>'
+param existingPrivateEndpointSubnetId = '<private endpoint subnet resource ID: not delegated>'
 
-// Private DNS (A8, still open). An existing app subnet requires createPrivateDnsZones = false: a VNet can be linked
-// to only one zone of each name. Then either name the hub's zones so the endpoints are registered there, or leave
-// them unset and rely on Azure Policy. vnetDnsServers points a VNet the template creates at the hub's resolver.
-// param createPrivateDnsZones = false
+// The VNet is shared, so the template mustn't create its own privatelink zones: a VNet can be linked to only one
+// zone of each name. How private DNS is managed is still open (docs/openquestions.md, N2): name the hub's zones
+// below, or leave them unset if an Azure Policy registers private endpoints in them.
+param createPrivateDnsZones = false
 // param existingBlobPrivateDnsZoneId = ''    // .../privateDnsZones/privatelink.blob.core.windows.net
 // param existingTablePrivateDnsZoneId = ''   // .../privateDnsZones/privatelink.table.core.windows.net
-// param vnetDnsServers = []
-
-// Ranges for the subnets the template creates, from IPAM (A8, still open); placeholders keep the template's
-// 10.60.0.0/24 defaults from being deployed by accident. Delete the prefix of any subnet supplied above, and all
-// three lines if both are.
-param vnetAddressPrefix = '<VNet CIDR from IPAM>'
-param appSubnetPrefix = '<app subnet CIDR inside the VNet, e.g. a /26>'
-param privateEndpointSubnetPrefix = '<private endpoint subnet CIDR inside the VNet, e.g. a /27>'
 
 // 1 removes cold starts (adds a small always-on cost). 0 scales to zero.
 param alwaysReadyInstances = 0

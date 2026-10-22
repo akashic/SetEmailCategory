@@ -1,6 +1,6 @@
 # SetEmailCategory: Deployment & Operations Runbook
 
-This runbook takes a new environment from nothing to a working Power Automate flow, then covers day-2 operations. Phases 1–3 and 5–6 are one-time admin tasks per environment. After that, every merge to `main` deploys automatically.
+This runbook takes a new environment from nothing to a working Power Automate flow, then covers day-2 operations. Phases 1–3 and 5–6 are one-time admin tasks per environment. After that, deploy each release by running the **build-and-deploy** workflow by hand; merging to `main` doesn't deploy.
 
 | Phase | What | Who (role needed) | Time |
 |---|---|---|---|
@@ -98,7 +98,7 @@ It also removes network grants from earlier runs that the parameter file no long
 
 ## Phase 4: First deployment
 
-Run the **build-and-deploy** workflow (Actions tab → *Run workflow*), or merge to `main`. The workflow:
+Run the **build-and-deploy** workflow (Actions tab → *Run workflow*, branch `main`). Deployment is manual only: merging to `main` doesn't deploy, and pull requests run only the build and tests. The workflow:
 1. Runs the unit tests, publishes a ReadyToRun build and lints the Bicep.
 2. Checks any existing subnets or NSG named in the parameter file (`Test-NetworkPrerequisites.ps1`) and stops before deploying anything if one doesn't meet the rules.
 3. Runs `what-if`, then deploys the Bicep and uploads the code package.

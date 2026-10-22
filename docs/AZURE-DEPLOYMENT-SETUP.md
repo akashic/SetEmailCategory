@@ -31,10 +31,10 @@ Answers from William Buck Australia's environment owners (2026-10-18; A10 and A1
 | A5 | Contributor plus ABAC-constrained RBAC Administrator on the RG? | Yes | None |
 | A6 | Azure Policy constraints? | Tags/locations, private storage, naming rules | Set `tags`. Private storage: `enablePrivateNetworking = true` (set; depends on A8). **Open: naming rules.** Names are generated as `<type>-<workload>-<env>-<suffix>` with only `workload` configurable, so get `<naming-convention>` and change the `names` variable in `infra/main.bicep` before deploying. |
 | A7 | Central Log Analytics or action groups? | No, self-contained | None |
-| A8 | Hub peering and central DNS, IP range, firewall egress, private inbound? | **Open** | See [A8 guidance](#a8-networking). |
+| A8 | Hub peering and central DNS, IP range, firewall egress, private inbound? | Partly: everything is in one platform-managed VNet, so no peering or IP ranges are needed. **Open:** private DNS, firewall egress, private inbound ([open questions](openquestions.md)) | See [A8 guidance](#a8-networking). |
 | A9 | Always-on instance to avoid cold starts? | No, scale to zero | `alwaysReadyInstances = 0` (default) |
-| A10 | Subnet rules? | **Rule:** William Buck policy requires a network security group on every subnet | The template attaches an NSG to each subnet it creates (`existingNsgId`, or one it creates per subnet); existing subnets must already have one. `Test-NetworkPrerequisites.ps1` enforces this. |
-| A11 | Re-use existing subnets? | Yes, an existing subnet is to be re-used. **Open:** its resource ID, and whether it's the app or private endpoint subnet | Set `existingAppSubnetId` and/or `existingPrivateEndpointSubnetId`; `Setup-GitHubOidc.ps1` reads them from the parameter file. Re-using the app subnet also needs the private DNS answer from A8. See [A8 guidance](#a8-networking). |
+| A10 | Subnet rules? | **Rule:** William Buck policy requires a network security group on every subnet | Both subnets exist (A11), so the platform team's subnets must carry the NSGs; the template creates none. If it ever creates a subnet, it attaches an NSG (`existingNsgId`, or its own). `Test-NetworkPrerequisites.ps1` enforces the rule. |
+| A11 | Re-use existing subnets? | Yes: **both** subnets (app and private endpoint) already exist in the same platform-managed VNet, in another resource group (2026-10-22). **Open:** their resource IDs | `existingAppSubnetId` and `existingPrivateEndpointSubnetId` hold placeholders in `prod.bicepparam`, and `createPrivateDnsZones = false` because the VNet is shared. `Setup-GitHubOidc.ps1` reads the IDs and grants access; the network team runs it. |
 | I1 | May an Application Administrator run `Setup-EntraApps.ps1`? | Yes | None |
 | I2 | Client secrets allowed, and for how long? | Yes, 12+ months | None; diarise rotation. |
 | I3 | Caller security group with *Assignment required*? | Yes: `<caller-group-name>` | Pass its object ID as `-CallerGroupObjectId`. Limit it to people who already have access to the shared mailbox. |
@@ -52,12 +52,12 @@ Replace each `<placeholder>` here, in the parameter file and in script arguments
 
 ### A8: networking
 
-Private storage (A6) puts storage behind private endpoints and the app's outbound traffic through a VNet. That needs an app subnet (delegated to `Microsoft.App/environments`) and a private endpoint subnet; each is either an existing subnet (A11) or created by the template in a new VNet. `prod.bicepparam` holds placeholders for the ranges of the subnets the template creates, so the deploy job stops until they're set from IPAM or the lines are deleted because the subnets exist. `createPrivateDnsZones` stays at its default (`true`, the template creates its own `privatelink` zones) until A8 is answered. **Ask the platform team how `privatelink.blob` and `privatelink.table` DNS is managed:** the hub zones' resource IDs, whether an Azure Policy registers private endpoints in them, and the hub DNS resolver's IP. Re-using the app subnet (A11) depends on the answer.
+Private storage (A6) puts storage behind private endpoints and the app's outbound traffic through a VNet. That needs an app subnet (delegated to `Microsoft.App/environments`) and a private endpoint subnet; each is either an existing subnet (A11) or created by the template in a new VNet. For production, both subnets already exist in one platform-managed VNet (A11): `prod.bicepparam` holds placeholders for their IDs, so the deploy job stops until they're set, and sets `createPrivateDnsZones = false` because the VNet is shared. **Still to ask the platform team: how `privatelink.blob` and `privatelink.table` DNS is managed:** the hub zones' resource IDs, or whether an Azure Policy registers private endpoints in them. The app can't resolve storage until this is settled.
 
 - **NSGs (A10):** every subnet the template creates gets an NSG with Azure's default rules (or `existingNsgId`). Add rules only if the firewall decision below calls for them.
 - **Existing subnets (A11):** set the IDs in the parameter file. `Setup-GitHubOidc.ps1` reads them, checks them, and grants the deployment identity a join-only custom role on each one outside the RG, plus Reader on its VNet. The app subnet must be in Australia East, have an NSG, be delegated to `Microsoft.App/environments` only, be /27 or larger and have no private or service endpoints; the private endpoint subnet must be in Australia East, have an NSG and not be delegated. If only one subnet is supplied, the template's new VNet must be peered with the existing one ([runbook](RUNBOOK.md#private-networking)).
 - **Private DNS:** with an existing app subnet, the template's own zones aren't allowed (a VNet can be linked to only one zone of each name, so they'd fail to link or take over a shared VNet's storage name resolution). Set `createPrivateDnsZones = false` and either name the hub zones (`existingBlobPrivateDnsZoneId`, `existingTablePrivateDnsZoneId`; the identity gets Private DNS Zone Contributor on each) or rely on an Azure Policy that registers endpoints in them. The app's VNet must be linked to the hub zones or use the hub's resolver (`vnetDnsServers` for a VNet the template creates). Details in the [runbook](RUNBOOK.md#private-networking).
-- **Peering:** for a VNet the template creates, set `vnetAddressPrefix` and the subnet prefixes from IPAM, then peer after deployment.
+- **Peering:** not needed for production (both subnets are in one VNet). Only for a VNet the template creates: set `vnetAddressPrefix` and the subnet prefixes from IPAM, then peer after deployment.
 - **Firewall egress:** on Flex Consumption *all* outbound traffic uses the VNet. Allow at least `graph.microsoft.com`, `login.microsoftonline.com`, certificate-revocation endpoints, and the Application Insights endpoints in the connection string (`<region>.in.applicationinsights.azure.com`, `<region>.livediagnostics.monitor.azure.com`). Also allow the usage-data endpoints (`westeurope-5.in.applicationinsights.azure.com`, `westus-0.in.applicationinsights.azure.com`) or set `APPLICATIONINSIGHTS_STATSBEAT_DISABLED=true`. Test outbound connectivity before go-live.
 - **Private inbound:** not supported by this template. It needs a private endpoint on the app, self-hosted GitHub runners, and Power Platform VNet support (Managed Environment, E5/A5/G5-class licences, delegated subnets in both paired regions).
 
@@ -279,7 +279,7 @@ gh api -X POST repos/$REPO/environments/prod/deployment-branch-policies -f name=
 
 ### 5.3 Branch protection on `main`
 
-Pushes to `main` that touch `src/`, `tests/`, `infra/` or the workflow deploy. Require a PR with one approval, the **`build`** status check (strict), and block force pushes and deletion:
+`main` is what gets deployed when someone runs the workflow (it never deploys on push). Require a PR with one approval, the **`build`** status check (strict), and block force pushes and deletion:
 
 ```bash
 gh api -X PUT repos/WilliamBuckAustralia/SetEmailCategory/branches/main/protection --input - <<'EOF'
@@ -330,12 +330,12 @@ A repository ruleset with the same rules works too.
 | `tags` | Mandatory tags | `workload` and `environment` are added automatically |
 | `alertEmailAddresses` | Ops list (default `[]`, no alerts) | |
 | `enablePrivateNetworking` | `true` (default `false`) | Required by policy (A6) |
-| `existingAppSubnetId` / `existingPrivateEndpointSubnetId` | Commented out (default `''`, the template creates the subnet) | Full resource IDs of subnets to re-use (A11). Rules in [A8 guidance](#a8-networking). |
-| `existingNsgId` | Unset (default `''`, one NSG per created subnet) | NSG to attach to the subnets the template creates (A10) |
-| `vnetAddressPrefix` / `appSubnetPrefix` / `privateEndpointSubnetPrefix` | Placeholders (defaults `10.60.0.0/24` / `.0/26` / `.64/27`) | From IPAM (A8); subnets inside the VNet range. Only for subnets the template creates: delete the lines for supplied ones. |
-| `createPrivateDnsZones` | `true` | `false` with central private DNS (A8); required with `existingAppSubnetId` |
+| `existingAppSubnetId` / `existingPrivateEndpointSubnetId` | Placeholders (default `''`, the template creates the subnet) | Full resource IDs of the existing subnets in the shared VNet (A11). Rules in [A8 guidance](#a8-networking). |
+| `existingNsgId` | Unset (default `''`) | NSG to attach to subnets the template creates (A10). Unused in production: the template creates no subnets. |
+| `vnetAddressPrefix` / `appSubnetPrefix` / `privateEndpointSubnetPrefix` | Unset (defaults `10.60.0.0/24` / `.0/26` / `.64/27`) | Only for subnets the template creates, from IPAM. Unused in production. |
+| `createPrivateDnsZones` | `false` (default `true`) | Required with `existingAppSubnetId`; the shared VNet uses central private DNS (A8) |
 | `existingBlobPrivateDnsZoneId` / `existingTablePrivateDnsZoneId` | Commented out (default `''`) | Hub `privatelink.blob` / `privatelink.table` zones to register the endpoints in; both or neither, with `createPrivateDnsZones = false` (A8) |
-| `vnetDnsServers` | Commented out (default `[]`, Azure DNS) | DNS servers for a VNet the template creates, e.g. the hub resolver (A8) |
+| `vnetDnsServers` | Unset (default `[]`, Azure DNS) | DNS servers for a VNet the template creates, e.g. the hub resolver. Unused in production. |
 | `alwaysReadyInstances` | `0` | `1` removes cold starts at a fixed cost |
 | `workload` | `setemailcat` | 3–12 lowercase letters/digits; used in every name |
 | `maximumInstanceCount` / `httpPerInstanceConcurrency` | `40` / `50` | Minimum 40; keeps bursts on one instance |
@@ -359,7 +359,7 @@ Overwritten on every deployment, so don't edit these in the portal.
 
 ### 6.3 Workflow and connector
 
-- **Workflow:** PRs build and test; pushes to `main` touching code, infra or the workflow build and deploy to `prod`; *Run workflow* picks an environment. One deployment per environment at a time. Before what-if it runs `Test-NetworkPrerequisites.ps1` against the parameter file. It reads the four variables and the Bicep outputs `functionAppName`, `functionAppHostName` and `functionAppPrincipalId`. The smoke test expects `/api/health` to report the new commit, `runningInAzure: true` and `acceptingRequests: true`, and an unauthenticated POST to return 401.
+- **Workflow:** PRs build and test only. Deployment is manual: *Run workflow* (on `main`, or a release tag for a rollback) builds and deploys to the chosen environment; pushes and merges never deploy. One deployment per environment at a time. Before what-if it runs `Test-NetworkPrerequisites.ps1` against the parameter file. It reads the four variables and the Bicep outputs `functionAppName`, `functionAppHostName` and `functionAppPrincipalId`. The smoke test expects `/api/health` to report the new commit, `runningInAzure: true` and `acceptingRequests: true`, and an unauthenticated POST to return 401.
 - **Connector:** `Build-ConnectorDefinition.ps1` fills `{{FUNCTION_HOST}}` (from the run summary), `{{CONNECTOR_CLIENT_ID}}`, `{{API_IDENTIFIER_URI}}`, `{{TENANT_ID}}` (from `entra-output.<env>.json`) and `{{PUBLISHER}}`, writing `connector/dist/<env>/`. Paste the client secret on the connector's **Security** tab; it's never in these files.
 
 ---
@@ -430,7 +430,7 @@ Nothing on the Azure, Entra ID, Exchange or Power Platform side has been set up.
 
 | Item | State |
 |---|---|
-| Environment decisions | Mostly answered. **Open:** naming convention (A6, template change), networking (A8), the existing subnet's ID and purpose (A11), E2, G1, Flex availability and quota (A2), and the placeholder values. |
-| `infra/env/prod.bicepparam` | `location` and `enablePrivateNetworking` set; placeholders remain for mailbox, app IDs, tags, alert email and the VNet ranges; existing-subnet lines commented out until A11 is answered |
+| Environment decisions | Mostly answered. **Open:** naming convention (A6, template change), networking (A8: private DNS, firewall egress), the existing subnets' IDs (A11), E2, G1, Flex availability and quota (A2), and the placeholder values. |
+| `infra/env/prod.bicepparam` | `location`, `enablePrivateNetworking` and `createPrivateDnsZones = false` set; placeholders remain for mailbox, app IDs, tags, alert email and the two existing subnet IDs; hub DNS zone lines commented out until A8 is answered |
 | GitHub (environment `prod`, variables, protection rules, branch protection, Actions settings) | Not checked since the move to `WilliamBuckAustralia`; migrations don't reliably carry these over. Before the move none were set and no deployment had succeeded. Check with section 9. |
 | OIDC subject | Not checked; expected `repo:WilliamBuckAustralia@<owner-id>/SetEmailCategory@<repo-id>` |
