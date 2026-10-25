@@ -4,6 +4,8 @@ How to pull updates from the original GitHub repo into your copy without losing 
 
 The approach: add the original repo as a second remote (`upstream`), fetch its changes, and merge them into your copy. Git keeps your edits and only asks you to decide where both sides changed the same lines.
 
+> **Shortcut:** [`tools/Sync-FromUpstream.ps1`](tools/Sync-FromUpstream.ps1) does steps 1–3 and 5 for you (PowerShell 7). Run it from a clone of your copy: `./tools/Sync-FromUpstream.ps1`, adding `-AllowUnrelatedHistories` if your copy isn't a fork. It stops on conflicts so you can resolve them as in step 4.
+
 ---
 
 ## 1. Make a safety branch first
